@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d10">
+  <meta name="description" content="A small ship. An endless asteroid belt. Play Asteroid Drift, a free, old-school Three.js arcade game with keyboard and touch controls.">
+  <title>Asteroid Drift | curl.red arcade</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/arcade.css?v=20261024.5">
+  <script type="module" src="/arcade.mjs?v=20261024.6"></script>
+</head>
+<body data-state="ready">
+  <div class="cabinet">
+    <header class="masthead">
+      <a class="brand" href="/" aria-label="curl.red arcade home">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3 28 27 16 21 4 27Z"/><path d="m13 27 3 4 3-4"/></svg>
+        <span>curl<span class="brand-dot">.</span>red</span><span class="brand-tag">ARCADE</span>
+      </a>
+      <button id="account" class="pilot-button" type="button" title="Global top ten and passkey account">TOP 10 / PILOT</button>
+      <span class="system-status"><i aria-hidden="true"></i><span id="system-status">LOADING CARTRIDGE</span></span>
+    </header>
+
+    <main class="arena" aria-label="Asteroid Drift arcade">
+      <div class="hud">
+        <div class="stat score-stat"><span class="label">SCORE</span><output id="score">000000</output></div>
+        <div class="stat best-stat"><span class="label">PERSONAL BEST</span><output id="best">000000</output></div>
+        <div class="stat wave-stat"><span class="label">WAVE</span><output id="wave">01</output></div>
+        <div class="stat fleet-stat"><span class="label">SHIPS</span><span id="lives" class="lives" aria-label="3 ships remaining"></span></div>
+        <div class="tools">
+          <button id="sound" class="tool-button sound-button" type="button" aria-label="Mute sound" aria-pressed="true" title="Sound (M)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m11 5-5 4H3v6h3l5 4Z"/><path class="sound-waves" d="M15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/><path class="sound-off" d="m16 9 5 6m0-6-5 6"/></svg>
+          </button>
+          <button id="help" class="tool-button" type="button" aria-label="How to play" title="Flight manual">?</button>
+          <button id="pause" class="tool-button" type="button" aria-label="Pause game" title="Pause (P or Escape)" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="viewport" id="playfield">
+        <canvas id="game" tabindex="0" aria-label="Asteroid Drift playfield. Arrow keys or W A D to fly, Space to fire, Shift for shield, P to pause. On touch screens, use the left thumbstick and hold the right fire button."></canvas>
+        <div class="reticle reticle-tl" aria-hidden="true"></div>
+        <div class="reticle reticle-tr" aria-hidden="true"></div>
+        <div class="reticle reticle-bl" aria-hidden="true"></div>
+        <div class="reticle reticle-br" aria-hidden="true"></div>
+        <span class="field-coordinate" aria-hidden="true">DEEP FIELD / 07.19</span>
+
+        <section id="menu" class="menu-layer" aria-labelledby="game-title">
+          <div class="menu-content">
+            <div id="intro">
+              <p class="eyebrow"><span></span> A SMALL SHIP. A VERY BIG PROBLEM. <span></span></p>
+              <h1 id="game-title">ASTEROID<span>DRIFT</span></h1>
+              <p class="tagline">Break rocks. Chase your best.<br>Try not to become stardust.</p>
+            </div>
+            <div id="result" hidden>
+              <p class="eyebrow" id="result-eyebrow">TAKE A BREATHER</p>
+              <h2 id="result-title">FLIGHT PAUSED</h2>
+              <p class="result-copy" id="result-copy">The universe can wait.</p>
+              <div class="run-stats" id="run-stats" hidden>
+                <div><span class="label">FINAL SCORE</span><strong id="final-score">000000</strong></div>
+                <div><span class="label">WAVE REACHED</span><strong id="final-wave">01</strong></div>
+              </div>
+            </div>
+            <div id="manual" class="manual" hidden>
+              <p class="eyebrow">KNOW YOUR SHIP</p>
+              <h2 id="manual-title">FLIGHT MANUAL</h2>
+              <ul>
+                <li><b>Keep moving.</b> Your ship has momentum. Down or S applies the brakes.</li>
+                <li><b>Break the belt.</b> Big rocks split. Clear them all to reach the next wave.</li>
+                <li><b>Find your rhythm.</b> Chain hits for up to a 5x score multiplier.</li>
+                <li><b>Need a bailout?</b> Shield lasts 1.65 seconds and recharges in 7.</li>
+                <li><b>Grab red diamonds.</b> Earn triple shots or a fresh shield. Every 10,000 points earns a ship.</li>
+              </ul>
+              <p class="manual-touch touch-copy">Drag the left stick to steer and thrust; release to brake. Hold FIRE with your other thumb. Tap SHIELD when things get crowded.</p>
+              <p id="controller-help" class="manual-controller">Controller capability is being checked.</p>
+            </div>
+            <div id="console-view" class="console-panel" hidden>
+              <div class="console-header">
+                <span class="console-prompt" aria-hidden="true">&gt;_</span>
+                <div><p class="eyebrow">FLIGHT SYSTEM / LOCAL ACCESS</p><h2 id="console-title">CHEAT CONSOLE</h2></div>
+                <button id="console-close" type="button" aria-label="Close cheat console">&times;</button>
+              </div>
+              <p id="console-mode" class="console-status">ALL SYSTEMS NOMINAL</p>
+              <div id="cheat-list" class="cheat-list" aria-label="Seven flight cheats"></div>
+              <div class="console-preferences">
+                <button id="haptics-toggle" type="button" aria-pressed="false"><span>FIRING HAPTICS</span><span id="haptics-label">CHECKING</span></button>
+                <p id="haptics-help"></p>
+              </div>
+              <p class="console-disclaimer">LOCAL OVERRIDES ONLY. Cheat runs are marked SANDBOX and never replace your normal best. All seven switches reset when you reload.</p>
+            </div>
+            <button class="launch-button" id="launch" type="button" disabled><span id="launch-label">LOADING</span><span aria-hidden="true">&nearr;</span></button>
+            <div class="ranked-actions">
+              <button id="ranked" class="secondary-button" type="button">RANKED / SIGN IN</button>
+              <button id="finish-ranked" class="secondary-button" type="button" hidden>FINISH &amp; SAVE VERIFIED SCORE</button>
+              <button id="leave-ranked" class="secondary-button" type="button" hidden>BACK TO CASUAL</button>
+            </div>
+            <p class="start-hint keyboard-copy" id="start-hint">OR PRESS ENTER TO LAUNCH</p>
+            <p class="start-hint touch-copy" id="touch-start-hint">TWO THUMBS. INFINITE POSSIBILITIES.</p>
+          </div>
+          <div class="menu-footnote" aria-hidden="true"><span>01 / SHATTER</span><span>02 / SURVIVE</span><span>03 / REPEAT</span></div>
+        </section>
+
+        <div id="wave-banner" class="wave-banner" aria-live="polite" hidden><span id="wave-message">WAVE 01</span><small id="wave-subtitle">CLEAR THE BELT</small></div>
+        <div id="combo" class="combo" hidden><strong id="combo-multiplier">2x</strong><span>ON A ROLL</span></div>
+        <div id="floaters" class="floaters" aria-hidden="true"></div>
+        <div class="flight-status" id="flight-status" hidden>
+          <span id="sandbox-badge" class="sandbox-badge" hidden>SANDBOX</span><span id="ranked-badge" class="ranked-badge" hidden>SERVER VERIFIED</span>
+          <span id="shield-status">SHIELD READY</span><span class="charge-track"><span id="shield-charge"></span></span>
+          <span id="weapon-status" hidden>TRIPLE SHOT</span>
+        </div>
+
+        <div class="touch-controls" id="touch-controls" aria-label="Touch flight controls">
+          <div class="stick-area">
+            <div class="joystick" id="joystick" role="group" aria-label="Drag to steer and thrust">
+              <span class="stick-cross" aria-hidden="true"></span><span class="stick-thumb" id="stick-thumb" aria-hidden="true"></span>
+            </div>
+            <span class="touch-label">STEER + THRUST</span>
+          </div>
+          <div class="touch-actions">
+            <button id="touch-shield" class="touch-shield" type="button" aria-label="Activate shield"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9S4 17 4 12V6Z"/></svg><span>SHIELD</span></button>
+            <button id="touch-fire" class="touch-fire" type="button" aria-label="Hold to fire"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v6m0 8v6M2 12h6m8 0h6"/><circle cx="12" cy="12" r="4"/></svg><span>FIRE</span></button>
+          </div>
+        </div>
+        <p id="notice" class="notice" role="status" hidden></p>
+        <noscript><p class="fatal-notice">JavaScript is required to fly. Enable it, then reload this page.</p></noscript>
+      </div>
+
+      <div class="arena-bottom">
+        <span><i aria-hidden="true"></i> SECTOR <span id="sector">01</span><span class="frontier-label"><span class="sector-divider">/</span> ENDLESS FRONTIER</span></span>
+        <div class="arena-utilities"><span class="fps-meter" title="Rendered frames per second, averaged over one second; -- when paused or static"><span id="fps">--</span> FPS</span><button id="fullscreen" class="console-button" type="button" aria-label="Enter fullscreen (F)" aria-pressed="false" hidden>FULLSCREEN</button><button id="console" class="console-button" type="button" aria-label="Open cheat console" title="Cheat console (`)"><span aria-hidden="true">&gt;_</span> CONSOLE</button></div>
+      </div>
+    </main>
+
+    <section class="instructions keyboard-copy" aria-label="Keyboard controls">
+      <div><span class="key-pair"><kbd>A</kbd><kbd>D</kbd></span><span>ROTATE</span></div>
+      <div><kbd>W</kbd><span>THRUST</span></div>
+      <div><kbd class="wide-key">SPACE</kbd><span>FIRE</span></div>
+      <div><kbd class="wide-key">SHIFT</kbd><span>SHIELD</span></div>
+      <span class="arrow-note">ARROW KEYS WORK TOO</span>
+      <span class="pause-note"><kbd>P</kbd> PAUSE</span>
+    </section>
+    <section class="instructions touch-copy touch-instructions" aria-label="Touch instructions"><span>LEFT THUMB: FLY</span><span>RIGHT THUMB: FIRE</span><span>STILL ALIVE? GOOD.</span></section>
+    <footer class="footer"><span title="Casual gameplay statistics stay anonymous. Account, security, and ranked-flight audits include aliases and client IPs in protected storage. Audit retention is managed by the operator.">CASUAL: ANONYMOUS. RANKED: VERIFIED.</span><span>BUILT FOR THE VOID <span class="footer-star" aria-hidden="true">+</span></span></footer>
+    <dialog id="identity-dialog" class="identity-dialog" aria-labelledby="identity-title">
+      <div class="identity-heading"><div><p class="eyebrow">GLOBAL FLIGHT RECORDS</p><h2 id="identity-title">TOP TEN PILOTS</h2></div><button id="identity-close" class="tool-button" type="button" aria-label="Close pilot records">&times;</button></div>
+      <p class="identity-copy">One best verified score per account. Only the top ten public scores are retained. Local scores and cheat flights cannot be imported.</p>
+      <ol id="leaderboard-list" class="leaderboard-list"></ol><p id="leaderboard-empty" class="identity-copy">No ranked scores yet. The first orbit is yours.</p>
+      <button id="refresh-scores" class="secondary-button" type="button">REFRESH RECORDS</button>
+      <p id="passkey-unsupported" class="identity-copy" hidden>This browser cannot create passkeys here. Use a current secure browser, or enjoy casual flight without an account.</p>
+      <section id="signed-out">
+        <h3>RESERVE A PUBLIC HANDLE</h3>
+        <p class="identity-copy">Use an alias, not your real name. Choose 3-20 ASCII letters, digits, or underscores. Passkeys protect ownership with your device PIN, face, fingerprint, or security key; no password or email is collected.</p>
+        <form id="register-form" novalidate>
+          <label for="username">Public pilot handle</label>
+          <input id="username" type="text" autocomplete="username" inputmode="text" minlength="3" maxlength="20" pattern="[A-Za-z0-9_]{3,20}" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+          <button class="secondary-button" type="submit">CREATE HANDLE + PASSKEY</button>
+        </form>
+        <button id="signin" class="secondary-button" type="button">SIGN IN WITH A PASSKEY</button>
+      </section>
+      <section id="signed-in" hidden>
+        <h3>PILOT <span id="pilot-name"></span></h3><p id="passkey-count" class="identity-copy"></p>
+        <div class="identity-actions"><button id="reauthenticate" class="secondary-button" type="button">VERIFY PASSKEY AGAIN</button><button id="add-passkey" class="secondary-button" type="button">ADD BACKUP PASSKEY</button><button id="signout" class="secondary-button" type="button">SIGN OUT</button></div>
+        <details><summary>Delete account</summary><p class="identity-copy">Removes your passkeys and public score. The handle stays reserved for 90 days; protected security audits have separate operator-managed retention. A fresh passkey verification is required.</p><form id="delete-form"><label for="delete-confirmation">Type your handle exactly</label><input id="delete-confirmation" type="text" autocomplete="off" maxlength="20" autocapitalize="none" spellcheck="false" required><button class="secondary-button danger-button" type="submit">DELETE WITH PASSKEY</button></form></details>
+      </section>
+      <p id="identity-status" class="identity-status" role="status" aria-live="polite"></p>
+      <p class="identity-copy privacy-copy">No weak password reset or email recovery: save a backup passkey or use your passkey provider's recovery. Account and security events, usernames, client IPs, run results, and periodic server gameplay summaries use protected audit storage, separately from the ten public scores. The operator manages audit delivery, access, and retention. Ordinary accepted control packets are not individually logged.</p>
+    </dialog>
+  </div>
+  <p class="sr-only" id="announcer" role="status" aria-live="polite"></p>
+</body>
+</html>

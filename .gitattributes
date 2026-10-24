@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.png binary
+*.webp binary
+web/site/vendor/** linguist-vendored -whitespace

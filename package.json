@@ -1,0 +1,18 @@
+{
+  "name": "asteroid-drift",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": ["web", "server"],
+  "scripts": {
+    "dev": "node server/dev.mjs",
+    "start": "node server/server.mjs",
+    "build": "npm run build:browser --workspace server",
+    "test": "npm run test --workspaces --if-present",
+    "test:browser": "npm run test:browser --workspace web && npm run test:browser --workspace server"
+  }
+}
