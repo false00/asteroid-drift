@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { Game } from '../site/engine.mjs';
+import { RANKED_AREA, RANKED_SCALE, arenaForViewport } from '../site/arena.mjs';
 
 test('native fullscreen offers Exit/Esc on desktop without pausing and stays off iPhone', async ({ page }, testInfo) => {
   const { errors } = await openArcade(page);
@@ -69,6 +70,18 @@ async function openArcade(page, options = {}) {
       window.__arcadeViewport = { x, y, width, height };
       return viewport.call(this, x, y, width, height);
     };
+    const uniformNames = new WeakMap();
+    const getUniformLocation = WebGL2RenderingContext.prototype.getUniformLocation;
+    WebGL2RenderingContext.prototype.getUniformLocation = function (...args) {
+      const location = getUniformLocation.apply(this, args);
+      if (location) uniformNames.set(location, args[1]);
+      return location;
+    };
+    const uniformMatrix = WebGL2RenderingContext.prototype.uniformMatrix4fv;
+    WebGL2RenderingContext.prototype.uniformMatrix4fv = function (...args) {
+      if (uniformNames.get(args[0]) === 'projectionMatrix') window.__arcadeProjection = Array.from(args[2]);
+      return uniformMatrix.apply(this, args);
+    };
     window.__arcadeAudio = { contexts: [], starts: 0 };
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     if (AudioContext) {
@@ -114,13 +127,19 @@ async function noOverflow(page) {
 }
 
 async function mockRanked(page) {
-  const game = new Game(960, 640, () => 0.4, { resumeProtection: false });
+  const game = new Game(960, 640, () => 0.4, { resumeProtection: false, fixedScale: RANKED_SCALE });
   game.start();
   game.asteroids = [];
   game.waveBanner = 0;
   Object.assign(game.ship, { x: 240, y: 160, invulnerable: 0 });
   const inputs = [];
   const starts = [];
+  const viewports = [];
+  const resize = viewport => {
+    const arena = arenaForViewport(viewport.width, viewport.height);
+    game.resize(arena.width, arena.height);
+    viewports.push(viewport);
+  };
   const run = { id: '00000000-0000-4000-8000-000000000001' };
   await page.route('**/api/session', route => route.fulfill({ json: {
     authenticated: true, csrf: 'p'.repeat(43),
@@ -128,7 +147,9 @@ async function mockRanked(page) {
   } }));
   await page.route('**/api/ranked/current', route => route.fulfill({ json: { run: null } }));
   await page.route('**/api/ranked/start', route => {
-    starts.push(route.request().postDataJSON());
+    const body = route.request().postDataJSON();
+    starts.push(body);
+    resize(body.viewport);
     return route.fulfill({ json: { run } });
   });
   await page.route('**/api/ranked/ticket', route => route.fulfill({ json: { ticket: 'test-only-portrait-ticket' } }));
@@ -139,85 +160,101 @@ async function mockRanked(page) {
     socket = connection;
     connection.onMessage(raw => {
       const message = JSON.parse(raw);
-      if (message.type === 'attach') connection.send(JSON.stringify({ type: 'attached' }));
+      if (message.type === 'attach') {
+        resize(message.viewport);
+        connection.send(JSON.stringify({ type: 'attached' }));
+      }
       else if (message.type === 'resume') {
         game.state = 'playing';
         snapshot();
       } else if (message.type === 'pause') {
         game.state = 'paused';
         snapshot();
+      } else if (message.type === 'viewport') {
+        resize(message.viewport);
+        snapshot();
       } else if (message.type === 'input') inputs.push(message);
     });
   });
-  return { game, inputs, starts, snapshot };
+  return { game, inputs, starts, viewports, snapshot };
 }
 
 async function drawnArena(page) {
   return page.locator('canvas').evaluate(canvas => {
     const rect = canvas.getBoundingClientRect();
-    const scale = rect.width / canvas.width;
+    const scaleX = rect.width / canvas.width;
+    const scaleY = rect.height / canvas.height;
     const viewport = window.__arcadeViewport;
+    const projection = window.__arcadeProjection;
     return {
-      x: viewport.x * scale, y: viewport.y * scale,
-      width: viewport.width * scale, height: viewport.height * scale,
+      x: viewport.x * scaleX, y: viewport.y * scaleY,
+      width: viewport.width * scaleX, height: viewport.height * scaleY,
       fieldWidth: rect.width, fieldHeight: rect.height,
+      uniformScaleRatio: Math.abs(projection[0] * viewport.width / (projection[5] * viewport.height)),
     };
   });
 }
 
-test('ranked phone arena uses a larger uncropped portrait view and returns cleanly to landscape and casual', async ({ page, isMobile }) => {
-  test.skip(!isMobile, 'Responsive ranked phone projection.');
+test('ranked and casual fill the same complete playfield across phone, landscape and desktop sizes', async ({ page }) => {
   const ranked = await mockRanked(page);
   const { errors } = await openArcade(page);
-  await page.setViewportSize({ width: 390, height: 844 });
+  const fullCanvas = async () => {
+    await expect.poll(async () => {
+      const arena = await drawnArena(page);
+      return Math.max(Math.abs(arena.x), Math.abs(arena.y), Math.abs(arena.width - arena.fieldWidth), Math.abs(arena.height - arena.fieldHeight));
+    }).toBeLessThanOrEqual(1);
+    await expect.poll(async () => Math.abs((await drawnArena(page)).uniformScaleRatio - 1)).toBeLessThan(0.001);
+  };
+  await fullCanvas();
+  const casualBox = await page.locator('#playfield').boundingBox();
   await expect(page.locator('#ranked')).toHaveText('RANKED FLIGHT');
   await page.locator('#ranked').click();
   await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
-  await expect.poll(async () => {
-    const arena = await drawnArena(page);
-    return arena.height / arena.width;
-  }).toBeCloseTo(1.5, 2);
-  const portrait = await drawnArena(page);
-  const scale = Math.min(portrait.fieldWidth / 640, portrait.fieldHeight / 960);
-  expect(portrait.width).toBeCloseTo(640 * scale, 0);
-  expect(portrait.height).toBeCloseTo(960 * scale, 0);
-  expect(portrait.width * portrait.height / (portrait.fieldWidth * portrait.fieldHeight)).toBeGreaterThan(2 / 3 - 0.01);
-  const oldScale = Math.min(portrait.fieldWidth / 960, portrait.fieldHeight / 640);
-  expect(portrait.width * portrait.height).toBeGreaterThan(960 * 640 * oldScale ** 2);
-  expect(portrait.y).toBeLessThan((portrait.fieldHeight - 640 * oldScale) / 2);
-  await expect(page.locator('#joystick')).toBeInViewport();
-  await expect(page.locator('#touch-fire')).toBeInViewport();
-  ranked.snapshot([{ type: 'hit', x: 240, y: 160, points: 100, multiplier: 1, size: 1 }]);
+  expect(await page.locator('#playfield').boundingBox()).toEqual(casualBox);
+  Object.assign(ranked.game, { score: 1234, lives: 2, elapsed: 42 });
+  ranked.snapshot();
+  for (const [width, height] of [[390, 844], [844, 390], [1440, 1000], [1024, 768], [390, 664]]) {
+    await page.setViewportSize({ width, height });
+    await fullCanvas();
+    await expect.poll(async () => {
+      const box = await page.locator('#playfield').boundingBox();
+      return Math.abs(ranked.game.width / ranked.game.height - box.width / box.height);
+    }).toBeLessThan(0.0001);
+    expect(Math.abs(ranked.game.width * ranked.game.height - RANKED_AREA)).toBeLessThan(0.000001);
+    expect(ranked.game.scale).toBe(RANKED_SCALE);
+    expect([ranked.game.score, ranked.game.lives, ranked.game.elapsed]).toEqual([1234, 2, 42]);
+    await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+    await noOverflow(page);
+  }
+  const field = await drawnArena(page);
+  ranked.snapshot([{ type: 'hit', x: ranked.game.width / 4, y: ranked.game.height / 4, points: 100, multiplier: 1, size: 1 }]);
   const floater = page.locator('#floaters .floater');
   await expect(floater).toBeVisible();
   const position = await floater.evaluate(node => {
     const matrix = new DOMMatrixReadOnly(getComputedStyle(node).transform);
     return { x: matrix.m41, y: matrix.m42 };
   });
-  expect(position.y).toBeCloseTo(portrait.y + 720 * scale, 0);
-  expect(position.x).toBeLessThanOrEqual(portrait.x + 160 * scale + 1);
-  expect(position.x).toBeGreaterThan(portrait.x + 130 * scale);
-  await page.setViewportSize({ width: 390, height: 664 });
+  expect(Math.abs(position.x - field.fieldWidth / 4)).toBeLessThan(1);
+  expect(position.y).toBeLessThanOrEqual(field.fieldHeight / 4 + 1);
+  expect(position.y).toBeGreaterThan(field.fieldHeight / 4 - 20);
+  expect(ranked.starts).toHaveLength(1);
+  expect(ranked.viewports.length).toBeGreaterThanOrEqual(5);
+  await page.locator('#pause').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'paused');
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await fullCanvas();
   await expect.poll(async () => {
-    const arena = await drawnArena(page);
-    return arena.height / arena.width;
-  }).toBeCloseTo(1.5, 2);
-  await noOverflow(page);
-  await page.setViewportSize({ width: 844, height: 390 });
-  await expect.poll(async () => {
-    const arena = await drawnArena(page);
-    return arena.width / arena.height;
-  }).toBeCloseTo(1.5, 2);
-  expect(ranked.game.width).toBe(960);
-  expect(ranked.game.height).toBe(640);
+    const box = await page.locator('#playfield').boundingBox();
+    return Math.abs(ranked.game.width / ranked.game.height - box.width / box.height);
+  }).toBeLessThan(0.0001);
+  await page.locator('#ranked').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
   expect(ranked.starts).toHaveLength(1);
   await page.locator('#pause').click();
   await expect(page.locator('body')).toHaveAttribute('data-state', 'paused');
   await page.locator('#leave-ranked').click();
   await expect(page.locator('body')).toHaveAttribute('data-state', 'ready');
-  const casual = await drawnArena(page);
-  expect(casual.width).toBeCloseTo(casual.fieldWidth, 0);
-  expect(casual.height).toBeCloseTo(casual.fieldHeight, 0);
+  await fullCanvas();
   expect(errors).toEqual([]);
 });
 
@@ -244,19 +281,19 @@ test('ranked portrait steering follows the screen for both thumbs and controller
     }
     await page.mouse.up();
   };
-  await steer(0, -25, 32768, true);
-  await steer(25, 0, 49151);
-  await steer(0, 25, 0);
-  await steer(-25, 0, 16384);
+  await steer(0, -25, 16384, true);
+  await steer(25, 0, 32768);
+  await steer(0, 25, 49151);
+  await steer(-25, 0, 0);
   await connectVirtualPad(page);
   await page.evaluate(() => { window.__virtualPad.axes = [0, -0.8]; });
-  await expect.poll(() => ranked.inputs.at(-1)?.aim).toBe(32768);
+  await expect.poll(() => ranked.inputs.at(-1)?.aim).toBe(16384);
   await page.evaluate(() => { window.__virtualPad.axes = [0, 0]; });
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => {
     const arena = await drawnArena(page);
-    return arena.width / arena.height;
-  }).toBeCloseTo(1.5, 2);
+    return Math.abs(arena.uniformScaleRatio - 1);
+  }).toBeLessThan(0.001);
   await steer(0, -25, 16384);
   expect(ranked.starts).toHaveLength(1);
   expect(errors).toEqual([]);

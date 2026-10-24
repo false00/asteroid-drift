@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { Game } from '../web/site/engine.mjs';
+import { DEFAULT_VIEWPORT, RANKED_SCALE, arenaForViewport, isRankedArena } from '../web/site/arena.mjs';
 import { ApiError, Budget, base64url, digest, equal, integer, object, token } from './validation.mjs';
 
 export const ARENA = Object.freeze({ width: 960, height: 640, hz: 120 });
@@ -9,6 +10,15 @@ const EMPTY_INPUT = Object.freeze({ left: false, right: false, thrust: 0, brake:
 const random = () => randomBytes(4).readUInt32BE() / 4294967296;
 const visibleFields = ['state', 'width', 'height', 'scale', 'score', 'lives', 'wave', 'elapsed', 'combo', 'comboTime', 'shieldTime', 'shieldCooldown', 'tripleTime', 'waveBanner', 'waveDelay', 'ship', 'asteroids', 'bullets', 'pickups', 'stats'];
 const gameState = game => Object.fromEntries(visibleFields.map(key => [key, game[key]]));
+
+export function viewportArena(value) {
+  object(value, ['width', 'height']);
+  try { return arenaForViewport(value.width, value.height); }
+  catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    throw new ApiError(400, 'invalid_viewport');
+  }
+}
 
 export function controls(message) {
   object(message, ['type', 'seq', 'keys', 'thrust', 'aim', 'controls']);
@@ -25,11 +35,11 @@ export function controls(message) {
 }
 
 class Run {
-  constructor(accountId, ip, now) {
+  constructor(accountId, ip, now, arena = ARENA) {
     this.id = randomUUID();
     this.accountId = accountId;
     this.ip = ip;
-    this.game = new Game(ARENA.width, ARENA.height, random, { effects: false, resumeProtection: false });
+    this.game = new Game(arena.width, arena.height, random, { effects: false, resumeProtection: false, fixedScale: RANKED_SCALE });
     this.game.start();
     this.game.pause();
     this.socket = null;
@@ -48,10 +58,11 @@ class Run {
     this.mode = 'keyboard';
     this.finished = false;
     this.events = [];
+    this.viewportChanges = 0;
   }
 
   checkpoint() {
-    return { rules: 'ranked-v1', game: this.game, ticks: this.ticks, activeMs: this.activeMs, controlledMs: this.controlledMs, ip: this.ip, mode: this.mode };
+    return { rules: 'ranked-v1', game: this.game, ticks: this.ticks, activeMs: this.activeMs, controlledMs: this.controlledMs, ip: this.ip, mode: this.mode, viewportChanges: this.viewportChanges, leaseAt: this.game.state === 'paused' ? this.leaseAt : null };
   }
 
   summary() {
@@ -59,6 +70,7 @@ class Run {
       run_id: this.id, score: this.game.score, wave: this.game.wave, lives: this.game.lives,
       duration_ms: Math.floor(this.game.elapsed * 1000), controlled_ms: Math.floor(this.controlledMs),
       ticks: this.ticks, input_sequence: this.sequence, controls: this.mode,
+      arena_width: Math.round(this.game.width), arena_height: Math.round(this.game.height), viewport_changes: this.viewportChanges,
       ...this.game.stats, server_authoritative: true,
     };
   }
@@ -79,7 +91,9 @@ export class Runs {
     for (const saved of store.recover()) {
       const account = store.account(saved.accountId);
       if (!account) continue;
-      if (saved.updatedAt + LEASE_MS <= now()) {
+      const leaseAt = saved.state.game?.state === 'paused' ? saved.state.leaseAt ?? saved.updatedAt : saved.updatedAt;
+      if (!Number.isSafeInteger(leaseAt) || leaseAt < 0) throw new Error('A ranked checkpoint has an invalid lease.');
+      if (leaseAt + LEASE_MS <= now()) {
         store.atomic(() => {
           store.audit('ranked.expired', account, saved.state.ip, { run_id: saved.id, reason: 'restart_lease_expired' });
           store.db.prepare('DELETE FROM runs WHERE id=?').run(saved.id);
@@ -87,19 +101,24 @@ export class Runs {
         continue;
       }
       if (saved.state.rules !== 'ranked-v1') throw new Error('A ranked checkpoint uses unsupported rules.');
+      if (!isRankedArena(saved.state.game?.width, saved.state.game?.height)) throw new Error('A ranked checkpoint has invalid arena dimensions.');
+      const viewportChanges = saved.state.viewportChanges ?? 0;
+      if (!Number.isSafeInteger(viewportChanges) || viewportChanges < 0) throw new Error('A ranked checkpoint has an invalid viewport counter.');
       const run = new Run(saved.accountId, saved.state.ip, now());
       run.id = saved.id;
       Object.assign(run.game, saved.state.game);
       run.game.random = random;
       run.game.effects = false;
       run.game.resumeProtection = false;
+      run.game.fixedScale = run.game.scale = RANKED_SCALE;
       run.game.pause();
       run.game.events = [];
       run.ticks = saved.state.ticks;
       run.activeMs = saved.state.activeMs;
       run.controlledMs = saved.state.controlledMs;
       run.mode = saved.state.mode;
-      run.leaseAt = saved.updatedAt;
+      run.viewportChanges = viewportChanges;
+      run.leaseAt = leaseAt;
       this.runs.set(run.id, run);
       store.audit('ranked.recovered', account, run.ip, { run_id: run.id, score: run.game.score });
     }
@@ -112,14 +131,15 @@ export class Runs {
     return run ? { id: run.id, state: run.game.state, score: run.game.score, wave: run.game.wave, expiresAt: run.game.state === 'paused' ? run.leaseAt + LEASE_MS : null } : null;
   }
 
-  start(account, ip) {
+  start(account, ip, viewport = DEFAULT_VIEWPORT) {
     if (!this.available) throw new ApiError(503, 'ranked_unavailable');
     if (this.mine(account.id)) throw new ApiError(409, 'run_exists');
     if (this.runs.size >= 16) throw new ApiError(503, 'ranked_capacity');
-    const run = new Run(account.id, ip, this.now());
+    const arena = viewportArena(viewport);
+    const run = new Run(account.id, ip, this.now(), arena);
     this.store.atomic(() => {
       this.store.checkpoint(run);
-      this.store.audit('ranked.started', account, ip, { run_id: run.id, rules: 'ranked-v1', arena_width: ARENA.width, arena_height: ARENA.height });
+      this.store.audit('ranked.started', account, ip, { run_id: run.id, rules: 'ranked-v1', arena_width: Math.round(arena.width), arena_height: Math.round(arena.height) });
     });
     this.runs.set(run.id, run);
     return this.info(run);
@@ -153,7 +173,7 @@ export class Runs {
         if (++messages > 45 || data.length > 1024) throw new ApiError(429, 'input_rate_limited');
         const message = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(data));
         if (!run) {
-          object(message, ['type', 'ticket', 'runId']);
+          object(message, ['type', 'ticket', 'runId', 'viewport'], ['type', 'ticket', 'runId']);
           if (message.type !== 'attach') throw new ApiError(400, 'attach_required');
           const value = base64url(message.ticket, 43);
           const key = digest(value).toString('hex');
@@ -162,6 +182,7 @@ export class Runs {
           if (!ticket || ticket.until <= this.now() || ticket.runId !== message.runId || !equal(ticket.sessionHash, session.hash)) throw new ApiError(403, 'invalid_ticket');
           run = this.runs.get(ticket.runId);
           if (!run || run.accountId !== session.accountId || !this.store.session(session.value)) throw new ApiError(401, 'authentication_required');
+          this.resize(run, message.viewport ?? DEFAULT_VIEWPORT);
           if (run.socket) run.socket.close(4003, 'Connected elsewhere');
           clearTimeout(timeout);
           run.socket = socket;
@@ -170,7 +191,7 @@ export class Runs {
           run.ip = ip;
           run.inputAt = this.now();
           this.store.audit('ranked.connected', this.actor(run), ip, { run_id: run.id });
-          this.send(run, { type: 'attached', run: this.info(run), arena: ARENA });
+          this.send(run, { type: 'attached', run: this.info(run), arena: { width: run.game.width, height: run.game.height, hz: ARENA.hz } });
           this.snapshot(run);
           return;
         }
@@ -188,6 +209,9 @@ export class Runs {
           run.inputAt = this.now();
           run.mode = message.controls;
           if (input.left || input.right || input.thrust || input.fire || input.shield || input.brake) run.actionAt = this.now();
+        } else if (message.type === 'viewport') {
+          object(message, ['type', 'viewport']);
+          if (this.resize(run, message.viewport)) this.snapshot(run);
         } else {
           object(message, ['type']);
           this.budget.take(`${run.id}:actions`, 20, 60000);
@@ -234,6 +258,19 @@ export class Runs {
   snapshot(run) {
     this.send(run, { type: 'snapshot', tick: run.ticks, game: gameState(run.game), events: run.events.splice(0, 128) });
     run.snapshotAt = this.now();
+  }
+
+  resize(run, viewport) {
+    if (!this.available) throw new ApiError(503, 'ranked_unavailable');
+    if (run.finished || !this.runs.has(run.id)) throw new ApiError(409, 'run_not_active');
+    if (run.game.state === 'paused' && run.leaseAt + LEASE_MS <= this.now()) throw new ApiError(409, 'run_expired');
+    const arena = viewportArena(viewport);
+    if (Math.abs(run.game.width - arena.width) < 0.0000001 && Math.abs(run.game.height - arena.height) < 0.0000001) return false;
+    this.budget.take(`${run.id}:viewport`, 12, 2000);
+    run.game.resize(arena.width, arena.height, run.events);
+    run.viewportChanges++;
+    this.store.checkpoint(run);
+    return true;
   }
 
   pause(run, reason) {

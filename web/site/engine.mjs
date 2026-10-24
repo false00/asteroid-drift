@@ -21,10 +21,12 @@ export function wrappedDelta(value, size) {
 }
 
 export class Game {
-  constructor(width, height, random = Math.random, { effects = true, resumeProtection = true } = {}) {
+  constructor(width, height, random = Math.random, { effects = true, resumeProtection = true, fixedScale = null } = {}) {
+    if (fixedScale !== null && (!Number.isFinite(fixedScale) || fixedScale <= 0)) throw new RangeError('A fixed game scale must be positive and finite.');
     this.random = random;
     this.effects = effects;
     this.resumeProtection = resumeProtection;
+    this.fixedScale = fixedScale;
     this.nextId = 1;
     this.cheats = Object.fromEntries(CHEATS.map(cheat => [cheat.key, false]));
     this.cheatsUsed = 0;
@@ -61,14 +63,15 @@ export class Game {
     }
   }
 
-  resize(width, height) {
+  resize(width, height, additionalEvents = []) {
     if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
       throw new RangeError('The playfield must have positive, finite dimensions.');
     }
     const oldScale = this.scale;
-    this.scale = clamp(Math.min(width, height) / 600, 0.72, 1.1);
+    this.scale = this.fixedScale ?? clamp(Math.min(width, height) / 600, 0.72, 1.1);
     if (this.width && this.height) {
-      for (const item of [this.ship, ...this.asteroids, ...this.bullets, ...this.pickups, ...this.particles, ...this.floaters]) {
+      const events = [...this.events, ...additionalEvents].filter(event => Number.isFinite(event.x) && Number.isFinite(event.y));
+      for (const item of [this.ship, ...this.asteroids, ...this.bullets, ...this.pickups, ...this.particles, ...this.floaters, ...events]) {
         item.x = wrap(item.x * width / this.width, width);
         item.y = wrap(item.y * height / this.height, height);
         if ('radius' in item) item.radius *= this.scale / oldScale;

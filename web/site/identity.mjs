@@ -20,6 +20,7 @@ const messages = {
   run_exists: 'You already have a ranked flight. Resume or finish it first.',
   api_unavailable: 'Ranked accounts are offline. Casual flight and your local best still work.',
   connection_lost: 'The ranked connection was interrupted. Reconnect within ten minutes to continue.',
+  invalid_viewport: 'This playfield shape is outside the supported ranked range. Adjust the window or orientation; casual flight remains available.',
 };
 
 export class AccountError extends Error {

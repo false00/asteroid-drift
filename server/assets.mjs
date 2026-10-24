@@ -1,7 +1,7 @@
 export const FILES = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/index.html', ['index.html', 'text/html; charset=utf-8']],
-  ...['arcade', 'engine', 'feedback', 'gamepad', 'telemetry', 'identity', 'ranked-client', 'fullscreen', 'handles'].map(name => [`/${name}.mjs`, [`${name}.mjs`, 'text/javascript; charset=utf-8']]),
+  ...['arcade', 'arena', 'engine', 'feedback', 'gamepad', 'telemetry', 'identity', 'ranked-client', 'fullscreen', 'handles'].map(name => [`/${name}.mjs`, [`${name}.mjs`, 'text/javascript; charset=utf-8']]),
   ['/arcade.css', ['arcade.css', 'text/css; charset=utf-8']],
   ['/favicon.svg', ['favicon.svg', 'image/svg+xml']],
   ['/vendor/three.module.js', ['vendor/three.module.js', 'text/javascript; charset=utf-8']],

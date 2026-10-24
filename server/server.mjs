@@ -189,7 +189,7 @@ export async function buildApp(config) {
     reply.code(status).send({ error: code });
   });
 
-  app.get('/health', async () => ({ service: 'asteroid-drift', build: '1.0.0', ranked: mutationsAvailable && runs.available, auth_enabled: Boolean(config.test || config.authEnabled) }));
+  app.get('/health', async () => ({ service: 'asteroid-drift', build: '1.1.0', ranked: mutationsAvailable && runs.available, auth_enabled: Boolean(config.test || config.authEnabled) }));
   app.get('/api/session', async request => view(session(request)));
   app.get('/api/leaderboard', async () => ({ entries: store.leaderboard(), rules: 'ranked-v1', maximum: 10 }));
 
@@ -352,11 +352,11 @@ export async function buildApp(config) {
     return { run: runs.info(runs.mine(auth.accountId)) };
   });
   app.post('/api/ranked/start', async request => {
-    apiBody(request);
+    const body = apiBody(request, ['viewport'], []);
     mutable();
     const auth = session(request, true, true);
     budget.take(`start:${auth.accountId}`, 10, 60000);
-    return { run: runs.start(auth.account, request.clientIP) };
+    return { run: runs.start(auth.account, request.clientIP, body.viewport) };
   });
   app.post('/api/ranked/ticket', async request => {
     apiBody(request, ['runId']);

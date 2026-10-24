@@ -39,7 +39,9 @@ Browser
 
 ### Controls are input, not authority
 
-Ranked clients send quantized controls at up to 30 Hz. The server owns time, randomness, movement, collisions, lives, and scoring in a 960 x 640 arena, running the simulation at 120 Hz and sending snapshots at 20 Hz. The browser interpolates wrapped positions for rendering.
+Ranked clients send quantized controls at up to 30 Hz. The server owns time, randomness, movement, collisions, lives, and scoring, running the simulation at 120 Hz and sending snapshots at 20 Hz. The browser interpolates wrapped positions for rendering.
+
+The arena follows the available playfield on phones and desktops. Its total area and object scale are normalized, and viewport changes are validated and rate-limited by the server. Rotation, window resizing, and device handoff preserve the same flight and progress; layout changes do not award scores or reset lives and timers. Control sequences remain checked per connection. Arena shape can affect play; resizing is a permitted game input, not a source of client-provided scores or time.
 
 Client-supplied scores, positions, elapsed time, seeds, and cheat flags are rejected. Websocket attachment requires a short-lived, single-use ticket bound to the session and run; tickets travel in the first message rather than the URL.
 
@@ -91,7 +93,7 @@ npm run test:browser
 
 Tests cover simulation rules, rejected input shapes, origin and CSRF enforcement, cryptographic verification, storage failures, replay handling, and account lifecycle. Chromium and WebKit profiles exercise keyboard, multitouch, controller, fullscreen, and responsive rendering behavior.
 
-The browser integration suite registers a resident passkey through a Chromium virtual authenticator, plays a ranked flight, rejects a forged score, restarts against the same database and key, signs in again, and deletes the account with fresh proof. Signature verification remains part of the test.
+The browser integration suite registers a resident passkey through a Chromium virtual authenticator, moves the same ranked flight between desktop and phone layouts, rejects a forged score, restarts against the same database and key, signs in again, and deletes the account with fresh proof. Signature verification remains part of the test.
 
 CI runs locked installs, the client bundle build, and both test suites on hosted runners with read-only repository permissions. Tests use isolated state and require no production credentials.
 
@@ -146,6 +148,7 @@ The [management CLI](server/admin.mjs) requires an explicit `DATABASE_PATH` and 
 | Location | Responsibility |
 | --- | --- |
 | [Game model](web/site/engine.mjs) / [renderer](web/site/arcade.mjs) | Simulation rules, geometry, input integration, and viewport projection |
+| [Arena geometry](web/site/arena.mjs) | Shared viewport validation and normalized ranked dimensions |
 | [Ranked client](web/site/ranked-client.mjs) / [run manager](server/runs.mjs) | Control protocol, interpolation, room lifecycle, and authoritative results |
 | [API](server/server.mjs) / [configuration](server/config.mjs) | Authentication, request boundaries, static serving, and runtime configuration |
 | [Store](server/store.mjs) / [cryptography](server/secrets.mjs) | Transactions, account-bound encryption, lookup, and audit integrity |

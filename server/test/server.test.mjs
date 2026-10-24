@@ -122,6 +122,21 @@ test('ranked REST rejects browser scores and cheats rather than accepting signed
   assert.equal(env.store.leaderboard().length, 0);
 });
 
+test('ranked creation accepts only a bounded viewport and the server derives its arena', async t => {
+  const env = await rig(t);
+  const { result } = await env.register();
+  for (const viewport of [{ width: 0, height: 600 }, { width: 390.5, height: 620 }, { width: 390, height: 620, score: 9999 }, { width: 1, height: 100000 }]) {
+    assert.equal((await env.request('/api/ranked/start', { viewport })).status, 400);
+  }
+  const response = await env.request('/api/ranked/start', { viewport: { width: 390 * 64, height: 620 * 64 } });
+  assert.equal(response.status, 200);
+  const run = env.runs.mine(result.data.user.id);
+  assert.equal(run.id, response.data.run.id);
+  assert.ok(Math.abs(run.game.width / run.game.height - 390 / 620) < 0.0000001);
+  assert.ok(Math.abs(run.game.width * run.game.height - 960 * 640) < 0.000001);
+  assert.equal(run.game.score, 0);
+});
+
 test('legacy anonymous actual-play payloads remain separate and preserve the exact typed parser shape', async t => {
   const env = await rig(t);
   const payload = new URLSearchParams({

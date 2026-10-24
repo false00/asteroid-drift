@@ -6,8 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { buildApp } from '../server.mjs';
+import { RANKED_AREA, RANKED_SCALE } from '../../web/site/arena.mjs';
 
-const { chromium, expect } = createRequire(new URL('../../web/package.json', import.meta.url))('@playwright/test');
+const { chromium, devices, expect } = createRequire(new URL('../../web/package.json', import.meta.url))('@playwright/test');
 const directory = await mkdtemp(join(tmpdir(), 'asteroid-drift-browser-'));
 const masterKey = randomBytes(32);
 const config = {
@@ -54,10 +55,46 @@ try {
   await page.keyboard.up('Space');
   await page.locator('#fullscreen').click();
   await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
-  assert.equal(run.game.width, 960);
-  assert.equal(run.game.height, 640);
+  await expect.poll(async () => {
+    const box = await page.locator('#playfield').boundingBox();
+    return Math.abs(run.game.width / run.game.height - box.width / box.height);
+  }).toBeLessThan(0.0001);
+  assert.ok(Math.abs(run.game.width * run.game.height - RANKED_AREA) < 0.000001);
+  assert.equal(run.game.scale, RANKED_SCALE);
   await page.keyboard.press('Escape');
   await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(false);
+  await page.locator('#pause').click();
+  await expect.poll(() => run.game.state).toBe('paused');
+  const original = { id: run.id, score: run.game.score, lives: run.game.lives, elapsed: run.game.elapsed };
+  const phone = await browser.newContext({ ...devices['iPhone 13'], extraHTTPHeaders: { 'x-forwarded-for': '198.51.100.22' } });
+  await phone.addCookies(await context.cookies());
+  const mobile = await phone.newPage();
+  await mobile.goto(config.origin);
+  await expect(mobile.locator('#ranked')).toHaveText('RANKED FLIGHT');
+  await mobile.locator('#ranked').click();
+  await expect(mobile.locator('body')).toHaveAttribute('data-state', 'playing');
+  await expect.poll(async () => {
+    const box = await mobile.locator('#playfield').boundingBox();
+    return Math.abs(run.game.width / run.game.height - box.width / box.height);
+  }).toBeLessThan(0.0001);
+  assert.equal([...service.runs.runs.values()][0].id, original.id);
+  assert.equal(run.game.lives, original.lives);
+  assert.ok(run.game.score >= original.score && run.game.elapsed >= original.elapsed);
+  await mobile.setViewportSize({ width: 844, height: 390 });
+  await expect.poll(async () => {
+    const box = await mobile.locator('#playfield').boundingBox();
+    return Math.abs(run.game.width / run.game.height - box.width / box.height);
+  }).toBeLessThan(0.0001);
+  await phone.close();
+  await expect.poll(() => run.game.state).toBe('paused');
+  await page.locator('#ranked').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  await expect.poll(async () => {
+    const box = await page.locator('#playfield').boundingBox();
+    return Math.abs(run.game.width / run.game.height - box.width / box.height);
+  }).toBeLessThan(0.0001);
+  assert.equal([...service.runs.runs.values()][0].id, original.id);
+  assert.ok(run.game.score >= original.score);
   await page.evaluate(() => localStorage.setItem('curlred.asteroid-drift.best', '9999999999'));
   const forged = await page.evaluate(async () => {
     const session = await (await fetch('/api/session')).json();
@@ -101,7 +138,7 @@ try {
   const bytes = await readFile(config.databasePath);
   assert.equal(bytes.includes(Buffer.from('Verified_Pilot')), false);
   assert.deepEqual(errors.filter(message => !message.includes('400 (Bad Request)')), []);
-  console.info('Verified real-browser resident passkeys, ranked flight, canonical fullscreen arena, forged-score rejection, atomic persistence across restart, safe records, sign-in and fresh-passkey deletion.');
+  console.info('Verified real-browser resident passkeys, full-area ranked resizing and desktop/phone handoff, forged-score rejection, atomic persistence across restart, safe records, sign-in and fresh-passkey deletion.');
 } finally {
   clearInterval(timer);
   await browser?.close();

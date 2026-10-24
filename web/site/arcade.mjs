@@ -1,10 +1,10 @@
 import * as THREE from './vendor/three.module.js';
-import { Game, SHIELD_RECHARGE, CHEATS } from './engine.mjs?v=20261024.5';
+import { Game, SHIELD_RECHARGE, CHEATS } from './engine.mjs?v=20261024.7';
 import { Synth, Haptics, FrameRateMeter } from './feedback.mjs?v=20261024.5';
-import { GameplayTelemetry } from './telemetry.mjs?v=20261024.6';
+import { GameplayTelemetry } from './telemetry.mjs?v=20261024.7';
 import { GamepadInput, EMPTY_GAMEPAD_INPUT } from './gamepad.mjs?v=20261024.5';
-import { Identity, AccountError } from './identity.mjs?v=20261024.5';
-import { RankedClient } from './ranked-client.mjs?v=20261024.5';
+import { Identity, AccountError } from './identity.mjs?v=20261024.7';
+import { RankedClient } from './ranked-client.mjs?v=20261024.7';
 import { FullscreenControls, editable } from './fullscreen.mjs?v=20261024.5';
 
 const $ = id => {
@@ -122,34 +122,29 @@ class FlightRenderer {
     return new THREE.BufferGeometry().setFromPoints(points.map(([x, y, z = 0]) => new THREE.Vector3(x, y, z)));
   }
 
-  resize(width, height, worldWidth = width, worldHeight = height, portrait = false) {
+  resize(width, height, worldWidth = width, worldHeight = height) {
     this.renderer.setSize(width, height, false);
-    this.portrait = portrait;
-    this.worldWidth = worldWidth;
-    const displayWidth = portrait ? worldHeight : worldWidth;
-    const displayHeight = portrait ? worldWidth : worldHeight;
-    const ratio = Math.min(width / displayWidth, height / displayHeight);
-    this.viewport = { x: (width - displayWidth * ratio) / 2, y: (height - displayHeight * ratio) / 2, width: displayWidth * ratio, height: displayHeight * ratio, scale: ratio };
-    this.camera.right = displayWidth;
-    this.camera.bottom = displayHeight;
-    this.camera.rotation.z = portrait ? Math.PI / 2 : 0;
+    this.worldWidth = Math.sqrt(worldWidth * worldHeight * width / height);
+    this.worldHeight = worldWidth * worldHeight / this.worldWidth;
+    this.viewport = { x: 0, y: 0, width, height };
+    this.camera.right = this.worldWidth;
+    this.camera.bottom = this.worldHeight;
     this.camera.updateProjectionMatrix();
     let seed = 391;
     const random = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
     for (let i = 0; i < 160; i++) {
-      this.starPositions[i * 3] = random() * worldWidth;
-      this.starPositions[i * 3 + 1] = random() * worldHeight;
+      this.starPositions[i * 3] = random() * this.worldWidth;
+      this.starPositions[i * 3 + 1] = random() * this.worldHeight;
       this.starPositions[i * 3 + 2] = -100;
     }
     this.starGeometry.attributes.position.needsUpdate = true;
     this.starGeometry.computeBoundingSphere();
-    this.orbits.position.set(worldWidth / 2, worldHeight / 2, -50);
-    this.orbits.scale.setScalar(Math.min(worldWidth, worldHeight) * 0.45);
+    this.orbits.position.set(this.worldWidth / 2, this.worldHeight / 2, -50);
+    this.orbits.scale.setScalar(Math.min(this.worldWidth, this.worldHeight) * 0.45);
   }
 
-  project(x, y) {
-    const point = this.portrait ? { x: y, y: this.worldWidth - x } : { x, y };
-    return { x: this.viewport.x + point.x * this.viewport.scale, y: this.viewport.y + point.y * this.viewport.scale };
+  project(x, y, worldWidth, worldHeight) {
+    return { x: x / worldWidth * this.viewport.width, y: y / worldHeight * this.viewport.height };
   }
 
   clearEntities() {
@@ -182,6 +177,8 @@ class FlightRenderer {
   }
 
   render(game, time, shake) {
+    const scaleX = this.worldWidth / game.width;
+    const scaleY = this.worldHeight / game.height;
     const activeRocks = new Set(game.asteroids.map(rock => rock.id));
     for (const [id, visual] of this.rocks) {
       if (activeRocks.has(id)) continue;
@@ -193,18 +190,20 @@ class FlightRenderer {
     for (const rock of game.asteroids) {
       if (!this.rocks.has(rock.id)) this.rocks.set(rock.id, this.rockVisual(rock));
       const visual = this.rocks.get(rock.id);
-      const xOffset = rock.x < rock.radius ? game.width : rock.x > game.width - rock.radius ? -game.width : 0;
-      const yOffset = rock.y < rock.radius ? game.height : rock.y > game.height - rock.radius ? -game.height : 0;
+      const x = rock.x * scaleX;
+      const y = rock.y * scaleY;
+      const xOffset = x < rock.radius ? this.worldWidth : x > this.worldWidth - rock.radius ? -this.worldWidth : 0;
+      const yOffset = y < rock.radius ? this.worldHeight : y > this.worldHeight - rock.radius ? -this.worldHeight : 0;
       const offsets = [[0, 0], [xOffset, 0], [0, yOffset], [xOffset, yOffset]];
       visual.lines.forEach((line, i) => {
         line.visible = i === 0 || (i === 1 ? xOffset !== 0 : i === 2 ? yOffset !== 0 : xOffset !== 0 && yOffset !== 0);
-        line.position.set(rock.x + offsets[i][0], rock.y + offsets[i][1], 0);
+        line.position.set(x + offsets[i][0], y + offsets[i][1], 0);
         line.rotation.set(Math.sin(time * 0.18 + rock.id) * 0.33, Math.cos(time * 0.14 + rock.id) * 0.3, rock.angle);
         line.scale.setScalar(rock.radius);
       });
     }
     this.ship.visible = game.state !== 'ready' && game.state !== 'gameover';
-    this.ship.position.set(game.ship.x, game.ship.y, 10);
+    this.ship.position.set(game.ship.x * scaleX, game.ship.y * scaleY, 10);
     this.ship.rotation.z = game.ship.angle;
     this.ship.scale.setScalar(game.scale);
     this.shipBody.visible = game.ship.invulnerable === 0 || Math.floor(time * 12) % 2 === 0;
@@ -216,13 +215,15 @@ class FlightRenderer {
     const bullets = game.bullets.slice(0, 80);
     bullets.forEach((bullet, i) => {
       const speed = Math.hypot(bullet.vx, bullet.vy);
-      this.bulletPositions.set([bullet.x, bullet.y, 5, bullet.x - bullet.vx / speed * 9, bullet.y - bullet.vy / speed * 9, 5], i * 6);
+      const x = bullet.x * scaleX;
+      const y = bullet.y * scaleY;
+      this.bulletPositions.set([x, y, 5, x - bullet.vx / speed * 9, y - bullet.vy / speed * 9, 5], i * 6);
     });
     this.bulletGeometry.setDrawRange(0, bullets.length * 2);
     this.bulletGeometry.attributes.position.needsUpdate = true;
     const particles = reducedMotion.matches ? [] : game.particles;
     particles.forEach((particle, i) => {
-      this.particlePositions.set([particle.x, particle.y, 5], i * 3);
+      this.particlePositions.set([particle.x * scaleX, particle.y * scaleY, 5], i * 3);
       const fade = particle.life / particle.maxLife;
       this.particleColors.set(particle.color === 'red' ? [fade, 0.16 * fade, 0.08 * fade] : [0.85 * fade, 0.9 * fade, 0.72 * fade], i * 3);
     });
@@ -243,13 +244,13 @@ class FlightRenderer {
         this.scene.add(line);
       }
       const line = this.pickups.get(pickup.id);
-      line.position.set(pickup.x, pickup.y, 5);
+      line.position.set(pickup.x * scaleX, pickup.y * scaleY, 5);
       line.rotation.set(0.5, time, pickup.angle);
       line.scale.setScalar(pickup.radius * (1 + Math.sin(time * 5) * 0.1));
       line.visible = pickup.life > 3 || Math.floor(time * 8) % 2 === 0;
     }
     this.orbits.visible = game.state === 'ready';
-    this.camera.position.x = (this.portrait ? game.width : 0) + (shake ? Math.sin(time * 93) * shake : 0);
+    this.camera.position.x = shake ? Math.sin(time * 93) * shake : 0;
     this.camera.position.y = shake ? Math.cos(time * 87) * shake : 0;
     this.renderer.setScissorTest(false);
     this.renderer.clear();
@@ -382,6 +383,8 @@ async function startRanked(event) {
   haptics.activate(event);
   $('ranked').disabled = true;
   try {
+    const rect = playfield.getBoundingClientRect();
+    ranked.setViewport(rect.width, rect.height);
     if (ranked.active && !ranked.finished) {
       await ranked.resume();
       return;
@@ -877,7 +880,7 @@ function updateHud() {
       floaterNodes.set(floater.id, node);
     }
     const node = floaterNodes.get(floater.id);
-    const point = view ? view.project(floater.x, floater.y) : floater;
+    const point = view ? view.project(floater.x, floater.y, game.width, game.height) : floater;
     node.style.transform = `translate(${point.x}px, ${point.y}px)`;
     node.style.opacity = String(Math.min(1, floater.life * 2));
   }
@@ -898,7 +901,7 @@ function getInput(dt) {
     manualBrake: keys.has('KeyS') || keys.has('ArrowDown') || controllerInput.brake,
     fire: keys.has('Space') || actions.includes('fire') || tapFire > 0 || controllerInput.fire,
     shield: keys.has('ShiftLeft') || keys.has('ShiftRight') || actions.includes('shield') || tapShield || controllerInput.shield,
-    aim: aim === null ? null : aim + (view?.portrait ? Math.PI / 2 : 0),
+    aim,
   };
   tapShield = false;
   return input;
@@ -1046,8 +1049,15 @@ if (view) {
     const rect = playfield.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return;
     if (!force && rect.width === renderedWidth && rect.height === renderedHeight) return;
-    if (!ranked.active) game.resize(rect.width, rect.height);
-    view.resize(rect.width, rect.height, game.width, game.height, ranked.active && touchMode() && rect.height > rect.width);
+    if (ranked.active) {
+      try { ranked.setViewport(rect.width, rect.height); }
+      catch (error) {
+        if (!(error instanceof AccountError)) throw error;
+        pauseGame();
+        rankedFailure(error);
+      }
+    } else game.resize(rect.width, rect.height);
+    view.resize(rect.width, rect.height, game.width, game.height);
     renderedWidth = rect.width;
     renderedHeight = rect.height;
     clearInput();

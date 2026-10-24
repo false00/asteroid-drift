@@ -1,5 +1,6 @@
-import { Game, wrappedDelta } from './engine.mjs?v=20261024.5';
-import { AccountError } from './identity.mjs?v=20261024.5';
+import { Game, wrappedDelta } from './engine.mjs?v=20261024.7';
+import { AccountError } from './identity.mjs?v=20261024.7';
+import { DEFAULT_VIEWPORT, RANKED_SCALE, arenaForViewport, isRankedArena, viewportForSize } from './arena.mjs?v=20261024.7';
 
 const TAU = Math.PI * 2;
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
@@ -11,14 +12,34 @@ export class RankedClient {
     this.active = false;
     this.finished = false;
     this.socket = null;
-    this.game = new Game(960, 640, Math.random, { resumeProtection: false });
+    this.viewport = { ...DEFAULT_VIEWPORT };
+    this.game = new Game(960, 640, Math.random, { resumeProtection: false, fixedScale: RANKED_SCALE });
     this.controlModes = new Set();
     this.snapshots = [];
     this.inputSequence = 0;
     this.lastInput = -Infinity;
+    this.sentViewport = null;
+    this.lastViewportSent = -Infinity;
   }
 
   noteControl(kind) { this.controlModes.add(kind); }
+
+  setViewport(width, height) {
+    try { this.viewport = viewportForSize(width, height); }
+    catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      throw new AccountError('invalid_viewport');
+    }
+  }
+
+  syncViewport(now = performance.now(), immediate = false) {
+    if (!this.active || this.finished || this.socket?.readyState !== WebSocket.OPEN) return;
+    if (this.sentViewport?.width === this.viewport.width && this.sentViewport?.height === this.viewport.height) return;
+    if (!immediate && now - this.lastViewportSent < 250) return;
+    this.socket.send(JSON.stringify({ type: 'viewport', viewport: this.viewport }));
+    this.sentViewport = { ...this.viewport };
+    this.lastViewportSent = now;
+  }
 
   async start() {
     this.runId = null;
@@ -27,10 +48,11 @@ export class RankedClient {
     this.finished = false;
     this.snapshots = [];
     this.controlModes.clear();
-    this.game = new Game(960, 640, Math.random, { resumeProtection: false });
+    const arena = arenaForViewport(this.viewport.width, this.viewport.height);
+    this.game = new Game(arena.width, arena.height, Math.random, { resumeProtection: false, fixedScale: RANKED_SCALE });
     this.game.state = 'paused';
     const { run: existing } = await this.identity.request('/api/ranked/current');
-    const { run } = existing ? { run: existing } : await this.identity.request('/api/ranked/start', {});
+    const { run } = existing ? { run: existing } : await this.identity.request('/api/ranked/start', { viewport: this.viewport });
     this.runId = run.id;
     await this.connect();
     this.action('resume');
@@ -45,10 +67,17 @@ export class RankedClient {
     this.socket = socket;
     old?.close();
     this.inputSequence = 0;
+    this.sentViewport = null;
+    this.lastViewportSent = -Infinity;
     await new Promise((resolve, reject) => {
       let attached = false;
       const timeout = setTimeout(() => { socket.close(); reject(new AccountError('connection_lost')); }, 10000);
-      socket.addEventListener('open', () => socket.send(JSON.stringify({ type: 'attach', ticket, runId: this.runId })));
+      socket.addEventListener('open', () => {
+        if (socket !== this.socket) return;
+        socket.send(JSON.stringify({ type: 'attach', ticket, runId: this.runId, viewport: this.viewport }));
+        this.sentViewport = { ...this.viewport };
+        this.lastViewportSent = performance.now();
+      });
       socket.addEventListener('message', event => {
         if (socket !== this.socket) return;
         try {
@@ -97,14 +126,19 @@ export class RankedClient {
 
   receive(message) {
     const world = message.game;
-    if (!world || world.width !== 960 || world.height !== 640 || !['playing', 'paused', 'gameover'].includes(world.state) || !Number.isSafeInteger(world.score) || world.score < 0 || !world.ship || !Number.isFinite(world.ship.x) || !Number.isFinite(world.ship.y) || !Array.isArray(message.events) || message.events.length > 128) throw new Error('Invalid authoritative state.');
+    if (!world || !isRankedArena(world.width, world.height) || !Number.isFinite(world.scale) || Math.abs(world.scale - RANKED_SCALE) > 0.0000001 || !['playing', 'paused', 'gameover'].includes(world.state) || !Number.isSafeInteger(world.score) || world.score < 0 || !world.ship || !Number.isFinite(world.ship.x) || !Number.isFinite(world.ship.y) || !Array.isArray(message.events) || message.events.length > 128) throw new Error('Invalid authoritative state.');
     for (const field of ['asteroids', 'bullets', 'pickups']) if (!Array.isArray(world[field]) || world[field].length > 128) throw new Error('Invalid authoritative entities.');
     const previousState = this.game.state;
+    if (this.game.width !== world.width || this.game.height !== world.height) {
+      this.game.resize(world.width, world.height);
+      this.snapshots = [];
+    }
     this.snapshots.push({ world, at: performance.now(), tick: message.tick });
     if (this.snapshots.length > 2) this.snapshots.shift();
     Object.assign(this.game, world, {
       ship: { ...world.ship }, asteroids: world.asteroids.map(item => ({ ...item })),
       bullets: world.bullets.map(item => ({ ...item })), pickups: world.pickups.map(item => ({ ...item })),
+      fixedScale: RANKED_SCALE,
     });
     this.game.events.push(...message.events);
     if (this.game.events.length > 128) this.game.events.splice(0, this.game.events.length - 128);
@@ -114,6 +148,7 @@ export class RankedClient {
 
   advance(now, dt, input) {
     this.game.updateEffects(dt);
+    this.syncViewport(now);
     const newest = this.snapshots.at(-1);
     const previous = this.snapshots.at(-2);
     if (newest && previous) {
@@ -121,8 +156,8 @@ export class RankedClient {
       const amount = clamp((now - newest.at) / interval, 0, 1);
       const interpolate = (visual, old, next) => {
         if (!old || !next) return;
-        visual.x = lerpWrapped(old.x, next.x, amount, 960);
-        visual.y = lerpWrapped(old.y, next.y, amount, 640);
+        visual.x = lerpWrapped(old.x, next.x, amount, newest.world.width);
+        visual.y = lerpWrapped(old.y, next.y, amount, newest.world.height);
         if (Number.isFinite(next.angle) && Number.isFinite(old.angle)) visual.angle = old.angle + wrappedDelta(next.angle - old.angle, TAU) * amount;
       };
       interpolate(this.game.ship, previous.world.ship, newest.world.ship);
@@ -145,6 +180,7 @@ export class RankedClient {
 
   action(type) {
     if (this.socket?.readyState !== WebSocket.OPEN) throw new AccountError('connection_lost');
+    if (type === 'resume') this.syncViewport(performance.now(), true);
     this.socket.send(JSON.stringify({ type }));
   }
 
@@ -159,5 +195,6 @@ export class RankedClient {
     this.socket = null;
     this.snapshots = [];
     this.runId = null;
+    this.sentViewport = null;
   }
 }
