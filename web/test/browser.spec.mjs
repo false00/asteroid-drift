@@ -50,6 +50,7 @@ async function openArcade(page, options = {}) {
     let seed = 73;
     Math.random = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
     window.__arcadeDrawCalls = 0;
+    window.__arcadeLastDrawState = null;
     if (options.gamepadAccess === 'missing') {
       Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: undefined });
     } else if (options.gamepadAccess === 'blocked') {
@@ -66,6 +67,7 @@ async function openArcade(page, options = {}) {
       const original = WebGL2RenderingContext.prototype[method];
       WebGL2RenderingContext.prototype[method] = function (...args) {
         window.__arcadeDrawCalls++;
+        window.__arcadeLastDrawState = document.body?.dataset.state;
         return original.apply(this, args);
       };
     }
@@ -567,7 +569,7 @@ test('keyboard flight scores points, pauses, resumes, and retains the best score
   await page.keyboard.up('ArrowRight');
   await page.keyboard.press('p');
   await expect(page.locator('body')).toHaveAttribute('data-state', 'paused');
-  await page.waitForTimeout(80);
+  await expect.poll(() => page.evaluate(() => window.__arcadeLastDrawState)).toBe('paused');
   const paused = await page.evaluate(() => window.__arcadeDrawCalls);
   await page.waitForTimeout(120);
   expect(await page.evaluate(() => window.__arcadeDrawCalls)).toBe(paused);
