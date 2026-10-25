@@ -134,13 +134,34 @@ export class Runs {
   start(account, ip, viewport = DEFAULT_VIEWPORT) {
     if (!this.available) throw new ApiError(503, 'ranked_unavailable');
     if (this.mine(account.id)) throw new ApiError(409, 'run_exists');
-    if (this.runs.size >= 16) throw new ApiError(503, 'ranked_capacity');
+    return this.create(account, ip, viewport);
+  }
+
+  restart(account, ip, expectedRunId, viewport = DEFAULT_VIEWPORT) {
+    const previous = this.mine(account.id);
+    if ((previous?.id ?? null) !== expectedRunId) throw new ApiError(409, 'run_changed');
+    return this.create(account, ip, viewport, previous);
+  }
+
+  create(account, ip, viewport, previous = null) {
+    if (!this.available) throw new ApiError(503, 'ranked_unavailable');
+    if (this.runs.size >= 16 && !previous) throw new ApiError(503, 'ranked_capacity');
     const arena = viewportArena(viewport);
     const run = new Run(account.id, ip, this.now(), arena);
     this.store.atomic(() => {
+      if (previous) {
+        this.store.audit('ranked.abandoned', account, ip, { ...previous.summary(), reason: 'player_restart' });
+        this.store.db.prepare('DELETE FROM runs WHERE id=? AND account_id=?').run(previous.id, account.id);
+      }
       this.store.checkpoint(run);
       this.store.audit('ranked.started', account, ip, { run_id: run.id, rules: 'ranked-v1', arena_width: Math.round(arena.width), arena_height: Math.round(arena.height) });
     });
+    if (previous) {
+      previous.finished = true;
+      this.runs.delete(previous.id);
+      for (const [id, ticket] of this.tickets) if (ticket.runId === previous.id) this.tickets.delete(id);
+      previous.socket?.close(4000, 'Flight restarted by its pilot');
+    }
     this.runs.set(run.id, run);
     return this.info(run);
   }

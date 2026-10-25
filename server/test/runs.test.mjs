@@ -44,6 +44,49 @@ test('ranked controls accept only quantized controls, not score/dt/positions/che
   assert.throws(() => controls({ ...valid, keys: 32 }));
 });
 
+test('explicit restart replaces only the owned expected flight, invalidates its tickets, and never saves an unfinished score', t => {
+  const { store, account, session, pool, run, socket } = rig(t);
+  run.game.score = 99999;
+  run.activeMs = 5000;
+  const other = store.register({
+    id: randomUUID(), handle: 'Other_Pilot', ip: run.ip,
+    credential: { id: randomBytes(32).toString('base64url'), publicKey: randomBytes(64), counter: 0 },
+    deviceType: 'singleDevice', backedUp: false,
+  });
+  const otherRun = pool.start(other, run.ip);
+  assert.throws(() => pool.restart(other, run.ip, run.id), /run_changed/);
+  pool.ticket(session, run.id, run.ip);
+  assert.throws(() => pool.restart(account, run.ip, randomUUID()), /run_changed/);
+  assert.equal(pool.mine(account.id), run);
+  const fresh = pool.restart(account, run.ip, run.id, { width: 390 * 64, height: 620 * 64 });
+  assert.notEqual(fresh.id, run.id);
+  assert.equal(fresh.score, 0);
+  assert.equal(fresh.state, 'paused');
+  assert.equal(pool.mine(account.id).id, fresh.id);
+  assert.equal(pool.mine(other.id).id, otherRun.id);
+  assert.equal(run.finished, true);
+  assert.equal(socket.code, 4000);
+  assert.equal([...pool.tickets.values()].some(ticket => ticket.runId === run.id), false);
+  assert.equal(store.account(account.id).personalBest, 0);
+  assert.deepEqual(store.leaderboard(), []);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM runs').get().n, 2);
+  assert.throws(() => pool.restart(account, run.ip, run.id), /run_changed/);
+  assert.ok(store.export(0, 100).some(event => event.payload.event_action === 'ranked.abandoned' && event.payload.details.reason === 'player_restart'));
+});
+
+test('restart failure rolls back abandonment without closing the old flight or dropping its checkpoint', t => {
+  const { store, account, pool, run, socket } = rig(t);
+  const before = store.db.prepare('SELECT count(*) AS n FROM events').get().n;
+  store.db.exec(`CREATE TRIGGER deny_restart BEFORE INSERT ON events
+    WHEN (SELECT count(*) FROM events)=${before + 1} BEGIN SELECT RAISE(ABORT,'restart audit unavailable'); END`);
+  assert.throws(() => pool.restart(account, run.ip, run.id), /restart audit unavailable/);
+  assert.equal(pool.mine(account.id), run);
+  assert.equal(run.finished, false);
+  assert.equal(socket.readyState, 1);
+  assert.equal(store.db.prepare('SELECT id FROM runs').get().id, run.id);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM events').get().n, before);
+});
+
 test('a replayed/out-of-order websocket input closes the channel, audits the violation and cannot add a score', t => {
   const { store, socket } = rig(t);
   const input = { type: 'input', seq: 1, keys: 4, thrust: 0, aim: null, controls: 'keyboard' };

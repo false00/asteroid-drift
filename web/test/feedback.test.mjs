@@ -55,7 +55,7 @@ test('audio is gesture-unlocked, compressed, and starts with an audible launch c
 test('all gameplay and console cues have real oscillator or noise output', async () => {
   const synth = new Synth({ AudioContext });
   await synth.unlock();
-  for (const cue of ['shot', 'hit', 'death', 'shield', 'wave', 'clear', 'pickup', 'extra-life', 'gameover', 'combo', 'console', 'toggle', 'pause', 'resume']) {
+  for (const cue of ['shot', 'hit', 'death', 'shield', 'wave', 'clear', 'pickup', 'extra-life', 'gameover', 'combo', 'console', 'toggle', 'pause', 'resume', 'record', 'rank-up', 'leader']) {
     const count = synth.context.nodes.length;
     synth.play(cue, 2);
     assert.ok(synth.context.nodes.length > count, cue);

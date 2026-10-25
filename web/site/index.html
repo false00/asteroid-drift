@@ -7,8 +7,8 @@
   <meta name="description" content="A small ship. An endless asteroid belt. Play Asteroid Drift, a free, old-school Three.js arcade game with keyboard and touch controls.">
   <title>Asteroid Drift | curl.red arcade</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/arcade.css?v=20261024.5">
-  <script type="module" src="/arcade.mjs?v=20261024.7"></script>
+  <link rel="stylesheet" href="/arcade.css?v=20261024.8">
+  <script type="module" src="/arcade.mjs?v=20261024.8"></script>
 </head>
 <body data-state="ready">
   <div class="cabinet">
@@ -24,7 +24,7 @@
     <main class="arena" aria-label="Asteroid Drift arcade">
       <div class="hud">
         <div class="stat score-stat"><span class="label">SCORE</span><output id="score">000000</output></div>
-        <div class="stat best-stat"><span class="label">PERSONAL BEST</span><output id="best">000000</output></div>
+        <div class="stat best-stat"><span class="label" id="best-label">CASUAL BEST</span><output id="best">000000</output></div>
         <div class="stat wave-stat"><span class="label">WAVE</span><output id="wave">01</output></div>
         <div class="stat fleet-stat"><span class="label">SHIPS</span><span id="lives" class="lives" aria-label="3 ships remaining"></span></div>
         <div class="tools">
@@ -61,6 +61,7 @@
                 <div><span class="label">FINAL SCORE</span><strong id="final-score">000000</strong></div>
                 <div><span class="label">WAVE REACHED</span><strong id="final-wave">01</strong></div>
               </div>
+              <p id="record-result" class="record-receipt" hidden></p>
             </div>
             <div id="manual" class="manual" hidden>
               <p class="eyebrow">KNOW YOUR SHIP</p>
@@ -93,14 +94,25 @@
             <div class="ranked-actions">
               <button id="ranked" class="secondary-button" type="button">RANKED / SIGN IN</button>
               <button id="finish-ranked" class="secondary-button" type="button" hidden>FINISH &amp; SAVE VERIFIED SCORE</button>
+              <button id="restart-ranked" class="secondary-button" type="button" aria-describedby="ranked-recovery-copy" hidden>START NEW RANKED FLIGHT</button>
               <button id="leave-ranked" class="secondary-button" type="button" hidden>BACK TO CASUAL</button>
             </div>
+            <p id="ranked-recovery-copy" class="recovery-copy" hidden>Starting a new flight discards unfinished progress on your account. Saved personal and leaderboard records are untouched.</p>
             <p class="start-hint keyboard-copy" id="start-hint">OR PRESS ENTER TO LAUNCH</p>
             <p class="start-hint touch-copy" id="touch-start-hint">TWO THUMBS. INFINITE POSSIBILITIES.</p>
           </div>
           <div class="menu-footnote" aria-hidden="true"><span>01 / SHATTER</span><span>02 / SURVIVE</span><span>03 / REPEAT</span></div>
         </section>
 
+        <div id="record-celebration" class="record-celebration" aria-hidden="true" hidden>
+          <span class="record-orbit"></span>
+          <span class="record-emblem">+</span>
+          <p id="record-eyebrow" class="record-eyebrow"></p>
+          <strong id="record-title"></strong>
+          <span id="record-score" class="record-score"></span>
+          <span id="record-detail" class="record-detail"></span>
+        </div>
+        <span id="record-announcer" class="sr-only" role="status" aria-live="polite"></span>
         <div id="wave-banner" class="wave-banner" aria-live="polite" hidden><span id="wave-message">WAVE 01</span><small id="wave-subtitle">CLEAR THE BELT</small></div>
         <div id="combo" class="combo" hidden><strong id="combo-multiplier">2x</strong><span>ON A ROLL</span></div>
         <div id="floaters" class="floaters" aria-hidden="true"></div>

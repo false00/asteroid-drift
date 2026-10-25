@@ -46,6 +46,7 @@ test('real WebAuthn cryptography reserves an encrypted handle and creates a rota
   assert.equal(result.status, 200);
   assert.equal(result.data.authenticated, true);
   assert.equal(result.data.user.username, 'Space_Pilot');
+  assert.equal(result.data.user.personalBest, 0);
   assert.notEqual(env.cookie(), before);
   assert.match(result.headers['set-cookie'], /^__Host-curlred_session=/);
   for (const flag of ['Secure', 'HttpOnly', 'SameSite=Strict', 'Path=/']) assert.ok(result.headers['set-cookie'].includes(flag));
@@ -117,8 +118,55 @@ test('ranked REST rejects browser scores and cheats rather than accepting signed
   await env.register();
   assert.equal((await env.request('/api/ranked/start', { score: 9999999 })).status, 400);
   assert.equal((await env.request('/api/ranked/start', { cheats: 127 })).status, 400);
+  assert.equal((await env.request('/api/ranked/start', { personalBest: 9999999 })).status, 400);
   assert.equal((await env.request('/api/ranked/start', {})).status, 200);
   assert.equal((await env.request('/api/ranked/start', {})).status, 409);
+  assert.equal(env.store.leaderboard().length, 0);
+});
+
+test('personal best is read from the owned account and never accepted from browser data', async t => {
+  const env = await rig(t);
+  const { result } = await env.register();
+  const pilot = env.store.account(result.data.user.id);
+  const { id } = env.runs.start(pilot, '198.51.100.12');
+  const run = env.runs.runs.get(id);
+  run.game.score = 12345;
+  run.activeMs = 3000;
+  env.runs.finish(run, 'player_finished');
+  assert.equal((await env.request('/api/session')).data.user.personalBest, 12345);
+  assert.equal((await env.request('/api/auth/bootstrap', { personalBest: 9999999 })).status, 400);
+  await env.request('/api/auth/logout', {});
+  const signedOut = (await env.request('/api/session')).data;
+  assert.equal(signedOut.authenticated, false);
+  assert.equal(signedOut.user, null);
+});
+
+test('ranked restart requires authentication, exact origin, CSRF, a current owned run and the start rate budget', async t => {
+  const env = await rig(t);
+  assert.equal((await env.request('/api/ranked/restart', { runId: null })).status, 401);
+  await env.register();
+  const started = await env.request('/api/ranked/start', {});
+  const id = started.data.run.id;
+  for (const body of [{}, { runId: 'invalid' }, { runId: id, score: 99999 }, { runId: id, cheats: 127 }]) {
+    assert.equal((await env.request('/api/ranked/restart', body)).status, 400);
+  }
+  assert.equal((await env.request('/api/ranked/restart', { runId: id }, { origin: 'https://attacker.invalid' })).status, 403);
+  assert.equal((await env.request('/api/ranked/restart', { runId: id }, { 'x-csrf-token': 'forged' })).status, 403);
+  assert.equal((await env.request('/api/ranked/restart', { runId: null })).status, 409);
+  const before = env.store.db.prepare('SELECT count(*) AS n FROM runs').get().n;
+  const restarted = await env.request('/api/ranked/restart', { runId: id });
+  assert.equal(restarted.status, 200);
+  assert.notEqual(restarted.data.run.id, id);
+  assert.equal(env.store.db.prepare('SELECT count(*) AS n FROM runs').get().n, before);
+  assert.equal((await env.request('/api/ranked/restart', { runId: id })).status, 409);
+  let current = restarted.data.run.id;
+  for (let i = 0; i < 10; i++) {
+    const result = await env.request('/api/ranked/restart', { runId: current });
+    if (result.status === 429) break;
+    assert.equal(result.status, 200);
+    current = result.data.run.id;
+  }
+  assert.equal((await env.request('/api/ranked/restart', { runId: current })).status, 429);
   assert.equal(env.store.leaderboard().length, 0);
 });
 

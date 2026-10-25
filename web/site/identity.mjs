@@ -1,5 +1,6 @@
 import { startAuthentication, startRegistration } from './vendor/webauthn-browser-14.0.0.mjs';
 import { isPublicHandle } from './handles.mjs?v=20261024.5';
+import { isScore, leaderboardEntries } from './records.mjs?v=20261024.8';
 
 const $ = id => document.getElementById(id);
 const messages = {
@@ -21,6 +22,12 @@ const messages = {
   api_unavailable: 'Ranked accounts are offline. Casual flight and your local best still work.',
   connection_lost: 'The ranked connection was interrupted. Reconnect within ten minutes to continue.',
   invalid_viewport: 'This playfield shape is outside the supported ranked range. Adjust the window or orientation; casual flight remains available.',
+  run_not_found: 'That unfinished flight is no longer available. Retry to find your current flight, or start a new ranked flight.',
+  run_not_active: 'This flight is no longer active. Retry the connection, or start a new ranked flight.',
+  run_expired: 'The unfinished flight expired. You can start a new ranked flight; your saved records are safe.',
+  run_changed: 'Your current flight changed on another device. Retry to resume it, or choose a new flight again.',
+  invalid_ranked_response: 'The ranked response could not be verified. Retry the connection or start a new flight; no browser score will be uploaded.',
+  capacity_unavailable: 'Ranked service is busy. Retry shortly; casual flight and saved records remain available.',
 };
 
 export class AccountError extends Error {
@@ -111,7 +118,7 @@ export class Identity {
   }
 
   setSession(next) {
-    if (!next || typeof next !== 'object' || typeof next.authenticated !== 'boolean' || (next.authenticated && (!isPublicHandle(next.user?.username) || typeof next.user.id !== 'string' || next.user.id.length !== 36 || !/^[a-f0-9-]{36}$/.test(next.user.id))) || (next.csrf !== null && (typeof next.csrf !== 'string' || next.csrf.length !== 43 || /[^A-Za-z0-9_-]/.test(next.csrf)))) throw new AccountError('api_unavailable');
+    if (!next || typeof next !== 'object' || typeof next.authenticated !== 'boolean' || (next.authenticated && (!isPublicHandle(next.user?.username) || typeof next.user.id !== 'string' || next.user.id.length !== 36 || !/^[a-f0-9-]{36}$/.test(next.user.id) || !isScore(next.user.personalBest))) || (next.csrf !== null && (typeof next.csrf !== 'string' || next.csrf.length !== 43 || /[^A-Za-z0-9_-]/.test(next.csrf)))) throw new AccountError('api_unavailable');
     this.session = next;
     this.available = true;
     this.update();
@@ -126,6 +133,12 @@ export class Identity {
       console.warn('Ranked account service is unavailable; casual flight remains enabled.');
       this.update();
     }
+  }
+
+  recordBest(accountId, score) {
+    if (!isScore(score)) throw new AccountError('api_unavailable');
+    if (!this.session.authenticated || this.session.user.id !== accountId) return;
+    this.setSession({ ...this.session, user: { ...this.session.user, personalBest: Math.max(this.session.user.personalBest, score) } });
   }
 
   async bootstrap() {
@@ -189,11 +202,18 @@ export class Identity {
     void this.operation(() => this.loadScores());
   }
 
-  async loadScores() {
+  async readScores() {
     const { entries } = await this.request('/api/leaderboard');
-    if (!Array.isArray(entries) || entries.length > 10) throw new AccountError('api_unavailable');
-    const rows = entries.map((entry, i) => {
-      if (entry.rank !== i + 1 || !isPublicHandle(entry.username) || !Number.isSafeInteger(entry.score) || entry.score < 1) throw new AccountError('api_unavailable');
+    try { return leaderboardEntries(entries); }
+    catch (error) {
+      if (!(error instanceof TypeError)) throw error;
+      throw new AccountError('api_unavailable');
+    }
+  }
+
+  async loadScores() {
+    const entries = await this.readScores();
+    const rows = entries.map(entry => {
       const row = document.createElement('li');
       for (const text of [String(entry.rank).padStart(2, '0'), entry.username, entry.score.toLocaleString()]) {
         const span = document.createElement('span');

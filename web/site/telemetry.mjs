@@ -1,4 +1,4 @@
-export const GAME_BUILD = '20261024.7';
+export const GAME_BUILD = '20261024.8';
 export const QUALIFY_MS = 2000;
 export const HEARTBEAT_MS = 30000;
 

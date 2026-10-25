@@ -1,10 +1,11 @@
 import * as THREE from './vendor/three.module.js';
 import { Game, SHIELD_RECHARGE, CHEATS } from './engine.mjs?v=20261024.7';
-import { Synth, Haptics, FrameRateMeter } from './feedback.mjs?v=20261024.5';
-import { GameplayTelemetry } from './telemetry.mjs?v=20261024.7';
+import { Synth, Haptics, FrameRateMeter } from './feedback.mjs?v=20261024.8';
+import { GameplayTelemetry } from './telemetry.mjs?v=20261024.8';
 import { GamepadInput, EMPTY_GAMEPAD_INPUT } from './gamepad.mjs?v=20261024.5';
-import { Identity, AccountError } from './identity.mjs?v=20261024.7';
-import { RankedClient } from './ranked-client.mjs?v=20261024.7';
+import { Identity, AccountError } from './identity.mjs?v=20261024.8';
+import { RankedClient } from './ranked-client.mjs?v=20261024.8';
+import { FlightRecords } from './records.mjs?v=20261024.8';
 import { FullscreenControls, editable } from './fullscreen.mjs?v=20261024.5';
 
 const $ = id => {
@@ -301,6 +302,11 @@ let tapShield = false;
 let menuMode = 'ready';
 let consoleReturnState = 'ready';
 let runStartingBest = best;
+let casualRecords = new FlightRecords({ best });
+let startingRanked = false;
+let recoveryError = null;
+let celebrationTimer;
+let celebrationSequence = 0;
 let dirty = true;
 let graphicsLost = false;
 let view;
@@ -319,12 +325,13 @@ const identity = new Identity({
   notify,
   onPause: () => { pauseGame(); clearInput(); },
   onChange: session => {
-    if (ranked.active && session.authenticated && ranked.accountId !== session.user.id) leaveRanked();
+    if (ranked.active && (!session.authenticated || ranked.accountId !== session.user.id)) leaveRanked();
+    updateMenuActions();
     dirty = true;
   },
 });
 const ranked = new RankedClient({
-  identity, notify,
+  identity, notify, onFailure: rankedFailure,
   onFrame: () => { dirty = true; },
   onState: state => {
     if (!ranked.active) return;
@@ -335,6 +342,7 @@ const ranked = new RankedClient({
       document.body.dataset.state = 'playing';
       $('pause').disabled = false;
       $('pause').setAttribute('aria-label', 'Pause game');
+      focusControl(canvas);
       previousTime = 0;
       dirty = true;
     } else if (state === 'paused' && !['manual', 'console'].includes(menuMode)) {
@@ -344,8 +352,16 @@ const ranked = new RankedClient({
   },
   onFinish: result => {
     ranked.result = result;
+    identity.recordBest(ranked.accountId, result.personalBest);
     clearInput();
     showMenu('gameover');
+    if (result.newPersonalBest || result.rankImproved) {
+      celebrate({
+        personalBest: result.newPersonalBest, rank: result.rankImproved ? result.rank : null,
+        leader: result.rankImproved && result.rank === 1, previousBest: result.previousBest,
+      }, true);
+    } else synth.play('gameover');
+    focusControl($('launch'));
     $('announcer').textContent = `Server verified score ${result.score}. ${result.rank ? `Your account is number ${result.rank} in the top ten.` : 'This score did not reach the top ten.'}`;
   },
 });
@@ -357,16 +373,28 @@ function noteInput(event, kind) {
 }
 
 function rankedFailure(error) {
+  recoveryError = error instanceof AccountError ? error.message : 'The ranked operation could not be completed. Retry the connection or start a new flight. Unverified browser scores are never uploaded.';
+  if (error instanceof AccountError && ['run_not_found', 'run_not_active', 'run_expired'].includes(error.code)) ranked.runId = null;
+  if (ranked.active && !ranked.finished) {
+    game.state = 'paused';
+    clearInput();
+    clearCelebration();
+    showMenu('recovery');
+    focusControl($('launch'));
+    $('announcer').textContent = 'Ranked flight interrupted. Retry the connection or start a new ranked flight. Starting over discards unfinished progress, not saved records.';
+  }
   if (error instanceof AccountError) {
     notify(error.message);
     if (error.status === 401 || error.code === 'authentication_required') identity.open();
   } else {
     console.error('A ranked flight operation failed; account credentials were not logged.');
-    notify('The ranked flight could not be completed. Your unverified browser score will not be uploaded.');
+    notify(recoveryError);
   }
 }
 
 function leaveRanked() {
+  recoveryError = null;
+  clearCelebration();
   ranked.leave();
   game = casualGame;
   game.state = 'ready';
@@ -377,15 +405,19 @@ function leaveRanked() {
   updateHud();
 }
 
-async function startRanked(event) {
+async function startRanked(event, { restart = false } = {}) {
+  if (startingRanked) return;
   if (!identity.session.authenticated) { identity.open(); return; }
   if (!view || graphicsLost) { notify('Graphics must be available before starting a ranked flight.'); return; }
   haptics.activate(event);
-  $('ranked').disabled = true;
+  startingRanked = true;
+  recoveryError = null;
+  clearCelebration();
+  updateMenuActions();
   try {
     const rect = playfield.getBoundingClientRect();
     ranked.setViewport(rect.width, rect.height);
-    if (ranked.active && !ranked.finished) {
+    if (!restart && ranked.active && !ranked.finished && ranked.runId) {
       await ranked.resume();
       return;
     }
@@ -393,7 +425,7 @@ async function startRanked(event) {
     clearInput();
     ranked.leave();
     ranked.result = null;
-    const starting = ranked.start();
+    const starting = ranked.start({ restart });
     game = ranked.game;
     view.clearEntities();
     resizeView(true);
@@ -402,9 +434,11 @@ async function startRanked(event) {
     void synth.unlock('launch');
     notify('RANKED FLIGHT // Server-owned physics and score. No cheats. Active flights have no duration cap.', 4500);
   } catch (error) {
-    if (!ranked.runId) leaveRanked();
     rankedFailure(error);
-  } finally { $('ranked').disabled = false; }
+  } finally {
+    startingRanked = false;
+    updateMenuActions();
+  }
 }
 $('ranked').addEventListener('click', event => { void startRanked(event); });
 $('finish-ranked').addEventListener('click', () => {
@@ -412,6 +446,7 @@ $('finish-ranked').addEventListener('click', () => {
   catch (error) { rankedFailure(error); }
 });
 $('leave-ranked').addEventListener('click', leaveRanked);
+$('restart-ranked').addEventListener('click', event => { void startRanked(event, { restart: true }); });
 
 function resetFrameRate() {
   frameRate.reset();
@@ -566,11 +601,58 @@ function clearInput() {
   resetFrameRate();
 }
 
+function clearCelebration() {
+  clearTimeout(celebrationTimer);
+  $('record-celebration').hidden = true;
+  $('record-celebration').classList.remove('is-celebrating');
+  $('best').classList.remove('record-pulse');
+}
+
+function celebrate(record, confirmed = false) {
+  clearCelebration();
+  const kind = record.leader ? 'leader' : record.rank ? 'rank' : 'best';
+  const title = record.leader ? confirmed ? 'NEW #1 PILOT' : 'NUMBER ONE PACE'
+    : record.rank ? confirmed ? `RANK UP // #${record.rank}` : `TOP ${record.rank} PACE` : 'NEW PERSONAL BEST';
+  const detail = record.passed ? `${record.passed} ${record.passed === 1 ? 'PILOT PASSED' : 'PILOTS PASSED'}`
+    : record.personalBest ? `PREVIOUS BEST ${record.previousBest.toLocaleString()}` : 'A NEW PLACE AMONG THE STARS';
+  $('record-eyebrow').textContent = ranked.active ? confirmed ? 'SERVER VERIFIED // SAVED' : 'LIVE RANKED PACE // FINISH TO SAVE' : 'CASUAL FLIGHT // LOCAL RECORD';
+  $('record-title').textContent = title;
+  $('record-score').textContent = `${game.score.toLocaleString()} PTS`;
+  $('record-detail').textContent = detail;
+  const banner = $('record-celebration');
+  banner.dataset.kind = kind;
+  banner.dataset.phase = confirmed ? 'saved' : 'live';
+  banner.dataset.sequence = String(++celebrationSequence);
+  banner.hidden = false;
+  void banner.offsetWidth;
+  banner.classList.add('is-celebrating');
+  $('best').classList.add('record-pulse');
+  $('record-announcer').textContent = `${title}. Score ${game.score}. ${ranked.active && !confirmed ? 'Live server score; finish to save. Standings may change.' : detail}`;
+  synth.play(kind === 'leader' ? 'leader' : kind === 'rank' ? 'rank-up' : 'record');
+  celebrationTimer = setTimeout(clearCelebration, confirmed ? 5200 : 3800);
+}
+
+function updateMenuActions() {
+  const nextRanked = ranked.active && ranked.finished && menuMode === 'gameover';
+  const verifying = ranked.active && !ranked.finished && game.state === 'gameover';
+  $('launch-label').textContent = menuMode === 'recovery' ? 'RETRY CONNECTION' : nextRanked ? 'ANOTHER RANKED FLIGHT' : verifying ? 'VERIFYING RESULT...'
+    : menuMode === 'ready' ? 'LAUNCH GAME' : menuMode === 'paused' ? 'BACK TO FLIGHT'
+    : menuMode === 'gameover' ? 'ONE MORE RUN' : menuMode === 'console' && consoleReturnState !== 'playing' ? 'BACK TO ARCADE'
+    : game.state === 'paused' ? 'BACK TO FLIGHT' : 'BACK TO ARCADE';
+  $('launch').disabled = !view || graphicsLost || startingRanked || verifying;
+  $('ranked').hidden = ranked.active && ['gameover', 'recovery'].includes(menuMode);
+  $('restart-ranked').hidden = menuMode !== 'recovery';
+  $('restart-ranked').disabled = startingRanked;
+  $('ranked-recovery-copy').hidden = menuMode !== 'recovery';
+  $('ranked').disabled = startingRanked || verifying;
+  $('ranked').textContent = ranked.active && !ranked.finished ? 'RESUME RANKED FLIGHT' : identity.session.authenticated ? 'RANKED FLIGHT' : 'RANKED / SIGN IN';
+}
+
 function showMenu(mode) {
   menuMode = mode;
   $('menu').hidden = false;
   $('intro').hidden = mode !== 'ready';
-  $('result').hidden = !['paused', 'gameover'].includes(mode);
+  $('result').hidden = !['paused', 'gameover', 'recovery'].includes(mode);
   $('manual').hidden = mode !== 'manual';
   $('console-view').hidden = mode !== 'console';
   $('menu').classList.toggle('console-mode', mode === 'console');
@@ -578,14 +660,19 @@ function showMenu(mode) {
   playfield.classList.toggle('console-open', mode === 'console');
   $('menu').setAttribute('aria-labelledby', mode === 'console' ? 'console-title' : mode === 'manual' ? 'manual-title' : mode === 'ready' ? 'game-title' : 'result-title');
   $('run-stats').hidden = mode !== 'gameover';
-  $('ranked').parentElement.hidden = !['ready', 'paused', 'gameover'].includes(mode);
+  $('ranked').parentElement.hidden = !['ready', 'paused', 'gameover', 'recovery'].includes(mode);
   $('finish-ranked').hidden = !ranked.active || ranked.finished || mode !== 'paused';
   $('leave-ranked').hidden = !ranked.active;
-  $('ranked').textContent = ranked.active && !ranked.finished ? 'RESUME RANKED FLIGHT' : identity.session.authenticated ? 'RANKED FLIGHT' : 'RANKED / SIGN IN';
-  $('launch-label').textContent = mode === 'ready' ? 'LAUNCH GAME' : mode === 'paused' ? 'BACK TO FLIGHT' : mode === 'gameover' ? 'ONE MORE RUN' : mode === 'console' && consoleReturnState !== 'playing' ? 'BACK TO ARCADE' : game.state === 'paused' ? 'BACK TO FLIGHT' : 'BACK TO ARCADE';
+  updateMenuActions();
+  $('record-result').hidden = true;
+  $('result').classList.toggle('record-finale', mode === 'gameover' && ranked.active && ranked.finished && Boolean(ranked.result?.newPersonalBest || ranked.result?.rankImproved));
   updateControllerHints();
   resetFrameRate();
-  if (mode === 'paused') {
+  if (mode === 'recovery') {
+    $('result-eyebrow').textContent = 'RANKED CONNECTION';
+    $('result-title').textContent = 'FLIGHT INTERRUPTED';
+    $('result-copy').textContent = recoveryError;
+  } else if (mode === 'paused') {
     $('result-eyebrow').textContent = 'TAKE A BREATHER';
     $('result-title').textContent = 'FLIGHT PAUSED';
     $('result-copy').textContent = 'The universe can wait.';
@@ -596,9 +683,16 @@ function showMenu(mode) {
     $('final-score').textContent = pad(game.score);
     $('final-wave').textContent = pad(game.wave, 2);
     if (ranked.active) {
-      $('launch-label').textContent = 'CASUAL FLIGHT';
       $('result-eyebrow').textContent = ranked.finished ? 'SERVER VERIFIED FLIGHT' : 'VERIFYING SERVER RESULT';
-      $('result-copy').textContent = !ranked.finished ? 'Waiting for the server to commit the result. No browser score is accepted.' : ranked.result?.rank ? `Verified. Your account holds position ${ranked.result.rank} in the global top ten.` : 'Verified. Only the ten best per-account scores remain on the public board.';
+      const result = ranked.result;
+      $('result-copy').textContent = !ranked.finished ? 'Waiting for the server to commit the result. No browser score is accepted.'
+        : !result.qualified ? 'Flight verified. Score at least one point and fly for two active seconds to save a record.'
+        : result.rank ? `Verified. Your account holds position ${result.rank} in the global top ten.` : 'Verified. Your personal best is saved to your account; the public board retains only the top ten.';
+      if (ranked.finished) {
+        $('result-title').textContent = result.rankImproved ? result.rank === 1 ? 'NEW #1 PILOT' : 'RANK UP' : result.newPersonalBest ? 'NEW PERSONAL BEST' : 'FLIGHT COMPLETE';
+        $('record-result').textContent = `${result.newPersonalBest ? 'NEW RANKED BEST' : 'YOUR RANKED BEST'} ${result.personalBest.toLocaleString()}${result.rankImproved ? ` // ${result.previousRank ? `#${result.previousRank} TO ` : ''}#${result.rank} GLOBAL` : ''}`;
+        $('record-result').hidden = false;
+      }
     }
   }
   document.body.dataset.state = game.state;
@@ -616,6 +710,7 @@ function pauseGame(reason = 'pause') {
     catch (error) { rankedFailure(error); }
   } else telemetry.flush(reason, game);
   clearInput();
+  clearCelebration();
   synth.play('pause');
   showMenu('paused');
   focusControl($('launch'));
@@ -647,6 +742,10 @@ function resumeGame(event) {
 function launch(event) {
   if (!view || graphicsLost) return;
   haptics.activate(event);
+  if (menuMode === 'recovery') {
+    void startRanked(event);
+    return;
+  }
   if (menuMode === 'console' && !$('menu').hidden) {
     closeConsole(event);
     return;
@@ -660,10 +759,15 @@ function launch(event) {
     resumeGame(event);
     return;
   }
-  if (ranked.active) leaveRanked();
+  if (ranked.active) {
+    if (ranked.finished) void startRanked(event);
+    return;
+  }
+  clearCelebration();
   telemetry.flush('restart', game);
   clearInput();
   runStartingBest = best;
+  casualRecords = new FlightRecords({ best });
   game.start();
   synth.lastCombo = 1;
   telemetry.begin(touchMode() ? Math.min(screen.width, screen.height) < 700 ? 'phone' : 'tablet' : 'desktop');
@@ -794,10 +898,10 @@ function handleEvents() {
       synth.play('clear');
     } else if (event.type === 'gameover') {
       if (!ranked.active) telemetry.flush('gameover', game);
-      synth.play('gameover');
+      if (!ranked.active) synth.play('gameover');
       showMenu('gameover');
       focusControl($('launch'));
-      $('announcer').textContent = `Run complete. Score ${event.score}. Wave ${event.wave}.`;
+      if (!ranked.finished || !ranked.active) $('announcer').textContent = `Run complete. Score ${event.score}. Wave ${event.wave}.`;
     } else if (event.type === 'extra-life') {
       notify('10,000 POINTS // EXTRA SHIP', 2500);
       synth.play('extra-life');
@@ -827,7 +931,15 @@ function updateHud() {
     best = game.score;
     storage(store => store.setItem(BEST_KEY, String(best)));
   }
-  $('best').textContent = pad(best);
+  const accountBest = ranked.active || (game.state === 'ready' && identity.session.authenticated);
+  const savedRankedBest = identity.session.authenticated && (!ranked.active || identity.session.user.id === ranked.accountId) ? identity.session.user.personalBest : ranked.records?.best || 0;
+  $('best').textContent = pad(accountBest ? Math.max(savedRankedBest, ranked.active ? game.score : 0) : best);
+  $('best-label').textContent = accountBest ? 'RANKED BEST' : 'CASUAL BEST';
+  $('best').title = accountBest ? 'Account-wide verified best. A higher live server score is provisional until the flight is saved.' : 'Personal best for normal casual flights in this browser. Sandbox scores are excluded.';
+  if (game.state === 'playing' && !game.cheated && !document.hidden) {
+    const record = (ranked.active ? ranked.records : casualRecords)?.observe(game.score);
+    if (record) celebrate(record);
+  }
   $('wave').textContent = pad(Math.max(1, game.wave), 2);
   $('sector').textContent = pad(Math.max(1, game.wave), 2);
   const livesKey = `${game.lives}:${game.cheats.infiniteLives}`;

@@ -16,6 +16,7 @@ const SITE = fileURLToPath(new URL('../web/site/', import.meta.url));
 const COOKIE = '__Host-curlred_session';
 const cookie = (value, age = 43200) => `${COOKIE}=${value}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${age}`;
 const apiBody = (request, keys = [], required = keys) => object(request.body, keys, required);
+const isRunId = value => typeof value === 'string' && value.length === 36 && /^[a-f0-9-]{36}$/.test(value);
 
 export async function buildApp(config) {
   const origin = new URL(config.origin);
@@ -84,7 +85,10 @@ export async function buildApp(config) {
 
   function view(auth) {
     return auth?.accountId ? {
-      authenticated: true, user: { id: auth.accountId, username: auth.account?.username || store.account(auth.accountId).username, passkeys: store.credentials(auth.accountId).length },
+      authenticated: true, user: {
+        id: auth.accountId, username: auth.account?.username || store.account(auth.accountId).username,
+        passkeys: store.credentials(auth.accountId).length, personalBest: store.account(auth.accountId).personalBest,
+      },
       csrf: auth.csrf, expiresAt: auth.expiresAt, verifiedAt: auth.verifiedAt,
     } : { authenticated: false, user: null, csrf: auth?.csrf || null };
   }
@@ -189,7 +193,7 @@ export async function buildApp(config) {
     reply.code(status).send({ error: code });
   });
 
-  app.get('/health', async () => ({ service: 'asteroid-drift', build: '1.1.0', ranked: mutationsAvailable && runs.available, auth_enabled: Boolean(config.test || config.authEnabled) }));
+  app.get('/health', async () => ({ service: 'asteroid-drift', build: '1.2.0', ranked: mutationsAvailable && runs.available, auth_enabled: Boolean(config.test || config.authEnabled) }));
   app.get('/api/session', async request => view(session(request)));
   app.get('/api/leaderboard', async () => ({ entries: store.leaderboard(), rules: 'ranked-v1', maximum: 10 }));
 
@@ -358,11 +362,19 @@ export async function buildApp(config) {
     budget.take(`start:${auth.accountId}`, 10, 60000);
     return { run: runs.start(auth.account, request.clientIP, body.viewport) };
   });
+  app.post('/api/ranked/restart', async request => {
+    const body = apiBody(request, ['runId', 'viewport'], ['runId']);
+    mutable();
+    const auth = session(request, true, true);
+    if (body.runId !== null && !isRunId(body.runId)) throw new ApiError(400, 'invalid_run');
+    budget.take(`start:${auth.accountId}`, 10, 60000);
+    return { run: runs.restart(auth.account, request.clientIP, body.runId, body.viewport) };
+  });
   app.post('/api/ranked/ticket', async request => {
     apiBody(request, ['runId']);
     mutable();
     const auth = session(request, true, true);
-    if (typeof request.body.runId !== 'string' || request.body.runId.length !== 36 || !/^[a-f0-9-]{36}$/.test(request.body.runId)) throw new ApiError(400, 'invalid_run');
+    if (!isRunId(request.body.runId)) throw new ApiError(400, 'invalid_run');
     budget.take(`ticket:${auth.accountId}`, 12, 60000);
     return { ticket: runs.ticket(auth, request.body.runId, request.clientIP) };
   });

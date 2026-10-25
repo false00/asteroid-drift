@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Store } from '../store.mjs';
 import { Runs } from '../runs.mjs';
 import { username, cookieToken, base64url, Budget } from '../validation.mjs';
@@ -58,18 +61,22 @@ test('only ten best-per-account rows survive, ties are stable and finalization c
     run.activeMs = 10000;
     pool.finish(run, 'player_finished');
     assert.ok(store.leaderboard().length <= 10);
+    assert.equal(store.account(pilots[i].id).personalBest, i * 100 + 100);
     assert.throws(() => store.finalize(run, 'player_finished'), /run_not_active/);
     now++;
   }
   assert.equal(store.leaderboard().length, 10);
   assert.equal(store.leaderboard()[0].score, 1300);
   assert.equal(store.leaderboard().at(-1).score, 400);
+  assert.equal(store.account(pilots[0].id).personalBest, 100);
+  assert.equal(store.leaderboard().some(entry => entry.username === pilots[0].username), false);
   const newRun = pool.start(pilots[12], '198.51.100.12');
   const run = pool.runs.get(newRun.id);
   run.game.score = 50;
   run.activeMs = 5000;
   pool.finish(run, 'player_finished');
   assert.equal(store.leaderboard()[0].score, 1300);
+  assert.equal(store.account(pilots[12].id).personalBest, 1300);
   assert.equal(store.db.prepare('SELECT count(*) AS n FROM leaderboard WHERE account_id=?').get(pilots[12].id).n, 1);
   store.close();
 });
@@ -85,8 +92,90 @@ test('failed score/audit transactions cannot publish a success-shaped result', (
   store.db.exec("CREATE TRIGGER deny_audit BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'audit unavailable'); END");
   assert.throws(() => store.finalize(run, 'player_finished'), /audit unavailable/);
   assert.equal(store.leaderboard().length, 0);
+  assert.equal(store.account(pilot.id).personalBest, 0);
   assert.ok(store.db.prepare('SELECT id FROM runs WHERE id=?').get(id));
   store.close();
+});
+
+test('best and placement receipts change only for qualified authoritative improvements, with stable ties', () => {
+  const store = make();
+  const pool = new Runs(store);
+  const first = account(store, 'First_Pilot');
+  const second = account(store, 'Second_Pilot');
+  const finish = (pilot, score, activeMs = 3000) => {
+    const { id } = pool.start(pilot, '198.51.100.12');
+    const run = pool.runs.get(id);
+    Object.assign(run.game, { score, elapsed: activeMs / 1000 });
+    run.activeMs = activeMs;
+    const result = store.finalize(run, 'player_finished');
+    pool.runs.delete(id);
+    return result;
+  };
+  assert.deepEqual(finish(first, 500), {
+    score: 500, wave: 1, durationMs: 3000, qualified: true, rank: 1, previousRank: null,
+    personalBest: 500, previousBest: 0, newPersonalBest: true, rankImproved: true,
+  });
+  assert.equal(finish(second, 500).rank, 2);
+  const tied = finish(second, 500);
+  assert.equal(tied.newPersonalBest, false);
+  assert.equal(tied.rankImproved, false);
+  const improved = finish(second, 501);
+  assert.equal(improved.previousRank, 2);
+  assert.equal(improved.rank, 1);
+  assert.equal(improved.newPersonalBest, true);
+  assert.equal(improved.rankImproved, true);
+  const short = finish(second, 999999, 1999);
+  assert.equal(short.qualified, false);
+  assert.equal(short.personalBest, 501);
+  assert.equal(short.newPersonalBest, false);
+  assert.equal(short.rankImproved, false);
+  assert.equal(store.leaderboard()[0].score, 501);
+  assert.equal(finish(first, 0).personalBest, 500);
+  store.close();
+});
+
+test('a later audit failure rolls back personal best, leaderboard and run deletion together', () => {
+  const store = make();
+  const pilot = account(store);
+  const pool = new Runs(store);
+  const { id } = pool.start(pilot, '198.51.100.12');
+  const run = pool.runs.get(id);
+  run.game.score = 1234;
+  run.activeMs = 5000;
+  const before = store.db.prepare('SELECT count(*) AS n FROM events').get().n;
+  store.db.exec(`CREATE TRIGGER deny_evaluation BEFORE INSERT ON events
+    WHEN (SELECT count(*) FROM events)=${before + 1} BEGIN SELECT RAISE(ABORT,'evaluation audit unavailable'); END`);
+  assert.throws(() => store.finalize(run, 'player_finished'), /evaluation audit unavailable/);
+  assert.equal(store.account(pilot.id).personalBest, 0);
+  assert.equal(store.leaderboard().length, 0);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM events').get().n, before);
+  assert.ok(store.db.prepare('SELECT id FROM runs WHERE id=?').get(id));
+  store.close();
+});
+
+test('legacy databases seed one account best from retained scores and preserve it across restarts', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'asteroid-drift-records-'));
+  const config = { path: join(directory, 'game.sqlite'), masterKey: randomBytes(32) };
+  let store = new Store(config);
+  t.after(() => { if (store.db.open) store.close(); rmSync(directory, { recursive: true }); });
+  const pilot = account(store);
+  const pool = new Runs(store);
+  const { id } = pool.start(pilot, '198.51.100.12');
+  const run = pool.runs.get(id);
+  run.game.score = 1077520;
+  run.activeMs = 5000;
+  store.finalize(run, 'player_finished');
+  store.db.exec('ALTER TABLE accounts DROP COLUMN personal_best');
+  store.close();
+  store = new Store(config);
+  assert.equal(store.account(pilot.id).personalBest, 1077520);
+  assert.equal(store.account(pilot.id).username, pilot.username);
+  assert.equal(store.credentials(pilot.id).length, 1);
+  store.db.prepare('DELETE FROM leaderboard').run();
+  store.close();
+  store = new Store(config);
+  assert.equal(store.account(pilot.id).personalBest, 1077520);
+  assert.equal(store.leaderboard().length, 0);
 });
 
 test('opaque sessions are hashed, expire, and do not use usernames or browser storage as authority', () => {

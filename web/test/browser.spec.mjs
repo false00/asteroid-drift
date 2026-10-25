@@ -56,7 +56,11 @@ async function openArcade(page, options = {}) {
       Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => { throw new DOMException('Controller access blocked', 'SecurityError'); } });
     } else if (options.virtualGamepad || typeof navigator.getGamepads === 'function') {
       window.__virtualPad = null;
-      Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => window.__virtualPad ? [window.__virtualPad] : [] });
+      window.__arcadePadPolls = 0;
+      Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => {
+        window.__arcadePadPolls++;
+        return window.__virtualPad ? [window.__virtualPad] : [];
+      } });
     }
     for (const method of ['drawArrays', 'drawElements']) {
       const original = WebGL2RenderingContext.prototype[method];
@@ -126,7 +130,7 @@ async function noOverflow(page) {
   expect(bounds.y + bounds.height).toBeLessThanOrEqual(height + 1);
 }
 
-async function mockRanked(page) {
+async function mockRanked(page, { personalBest = 0, entries = [] } = {}) {
   const game = new Game(960, 640, () => 0.4, { resumeProtection: false, fixedScale: RANKED_SCALE });
   game.start();
   game.asteroids = [];
@@ -134,6 +138,9 @@ async function mockRanked(page) {
   Object.assign(game.ship, { x: 240, y: 160, invulnerable: 0 });
   const inputs = [];
   const starts = [];
+  const restarts = [];
+  let current = null;
+  let ticketFailure = false;
   const viewports = [];
   const resize = viewport => {
     const arena = arenaForViewport(viewport.width, viewport.height);
@@ -143,16 +150,40 @@ async function mockRanked(page) {
   const run = { id: '00000000-0000-4000-8000-000000000001' };
   await page.route('**/api/session', route => route.fulfill({ json: {
     authenticated: true, csrf: 'p'.repeat(43),
-    user: { id: '00000000-0000-4000-8000-000000000002', username: 'Portrait_Pilot', passkeys: 1 },
+    user: { id: '00000000-0000-4000-8000-000000000002', username: 'Portrait_Pilot', passkeys: 1, personalBest },
   } }));
-  await page.route('**/api/ranked/current', route => route.fulfill({ json: { run: null } }));
+  await page.route('**/api/leaderboard', route => route.fulfill({ json: { entries } }));
+  await page.route('**/api/ranked/current', route => route.fulfill({ json: { run: current } }));
+  const begin = body => {
+    if (starts.length + restarts.length > 1) {
+      game.start();
+      game.asteroids = [];
+      game.waveBanner = 0;
+    }
+    run.id = `00000000-0000-4000-8000-${String(starts.length + restarts.length).padStart(12, '0')}`;
+    resize(body.viewport);
+    current = { ...run };
+  };
   await page.route('**/api/ranked/start', route => {
     const body = route.request().postDataJSON();
     starts.push(body);
-    resize(body.viewport);
+    begin(body);
     return route.fulfill({ json: { run } });
   });
-  await page.route('**/api/ranked/ticket', route => route.fulfill({ json: { ticket: 'test-only-portrait-ticket' } }));
+  await page.route('**/api/ranked/restart', route => {
+    const body = route.request().postDataJSON();
+    if (body.runId !== (current?.id ?? null)) return route.fulfill({ status: 409, json: { error: 'run_changed' } });
+    restarts.push(body);
+    begin(body);
+    return route.fulfill({ json: { run } });
+  });
+  await page.route('**/api/ranked/ticket', route => {
+    if (ticketFailure) {
+      ticketFailure = false;
+      return route.fulfill({ status: 404, json: { error: 'run_not_found' } });
+    }
+    return route.fulfill({ json: { ticket: 'test-only-portrait-ticket' } });
+  });
   let socket;
   let tick = 0;
   const snapshot = (events = []) => socket.send(JSON.stringify({ type: 'snapshot', tick: ++tick, game, events }));
@@ -176,8 +207,166 @@ async function mockRanked(page) {
       } else if (message.type === 'input') inputs.push(message);
     });
   });
-  return { game, inputs, starts, viewports, snapshot };
+  const finish = ({ rank = null, previousRank = null, qualified = true } = {}) => {
+    const previousBest = personalBest;
+    personalBest = Math.max(personalBest, qualified ? game.score : 0);
+    current = null;
+    game.state = 'gameover';
+    snapshot([{ type: 'gameover', score: game.score, wave: game.wave }]);
+    const result = {
+      score: game.score, wave: game.wave, durationMs: Math.floor(game.elapsed * 1000), qualified,
+      personalBest, previousBest, newPersonalBest: personalBest > previousBest, rank, previousRank,
+      rankImproved: qualified && rank !== null && (previousRank === null || rank < previousRank),
+    };
+    socket.send(JSON.stringify({ type: 'finished', result }));
+    return result;
+  };
+  return {
+    game, inputs, starts, restarts, viewports, snapshot, finish,
+    failNextTicket: () => { ticketFailure = true; },
+    disconnect: () => socket.close({ code: 1011, reason: 'Local test transport interruption' }),
+  };
 }
+
+test('ranked failures offer a non-destructive retry and an explicit new-flight recovery', async ({ page }) => {
+  const ranked = await mockRanked(page, { personalBest: 500 });
+  ranked.failNextTicket();
+  const { errors } = await openArcade(page);
+  await page.locator('#ranked').click();
+  await expect(page.locator('#result-title')).toHaveText('FLIGHT INTERRUPTED');
+  await expect(page.locator('#result-copy')).toContainText('no longer available');
+  await expect(page.locator('#launch-label')).toHaveText('RETRY CONNECTION');
+  await expect(page.locator('#restart-ranked')).toBeVisible();
+  await expect(page.locator('#ranked-recovery-copy')).toContainText('discards unfinished progress');
+  await page.locator('#launch').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  expect(ranked.starts).toHaveLength(1);
+  expect(ranked.restarts).toHaveLength(0);
+  ranked.game.score = 400;
+  ranked.snapshot();
+  await expect(page.locator('#score')).toHaveText('000400');
+  ranked.disconnect();
+  await expect(page.locator('#result-title')).toHaveText('FLIGHT INTERRUPTED');
+  await expect(page.locator('#restart-ranked')).toBeInViewport();
+  await page.locator('#restart-ranked').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  expect(ranked.restarts).toHaveLength(1);
+  expect(ranked.restarts[0].runId).toBe('00000000-0000-4000-8000-000000000001');
+  await expect(page.locator('#score')).toHaveText('000000');
+  await expect(page.locator('#best')).toHaveText('000500');
+  await expect(page.locator('#record-celebration')).toBeHidden();
+  expect(errors.filter(message => !message.includes('404 (Not Found)'))).toEqual([]);
+});
+
+test('ranked records update immediately and the main replay button stays ranked without touching casual best', async ({ page }) => {
+  const ranked = await mockRanked(page, { personalBest: 172220 });
+  await page.addInitScript(() => localStorage.setItem('curlred.asteroid-drift.best', '12345'));
+  const { errors } = await openArcade(page);
+  await expect(page.locator('#best-label')).toHaveText('RANKED BEST');
+  await expect(page.locator('#best')).toHaveText('172220');
+  await page.locator('#ranked').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  Object.assign(ranked.game, { score: 1077520, wave: 44, elapsed: 300 });
+  ranked.snapshot();
+  await expect(page.locator('#best')).toHaveText('1077520');
+  ranked.finish({ rank: 1 });
+  await expect(page.locator('#launch')).toBeEnabled();
+  await expect(page.locator('#launch-label')).toHaveText('ANOTHER RANKED FLIGHT');
+  await expect(page.locator('#ranked')).toBeHidden();
+  await expect(page.locator('#result-title')).toHaveText('NEW #1 PILOT');
+  await expect(page.locator('#record-result')).toContainText('1,077,520');
+  await expect(page.locator('#record-result')).toContainText('#1 GLOBAL');
+  expect(await page.evaluate(() => localStorage.getItem('curlred.asteroid-drift.best'))).toBe('12345');
+  await page.locator('#launch').evaluate(button => { button.click(); button.click(); });
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  expect(ranked.starts).toHaveLength(2);
+  await expect(page.locator('#ranked-badge')).toBeVisible();
+  await expect(page.locator('#score')).toHaveText('000000');
+  await expect(page.locator('#best')).toHaveText('1077520');
+  await expect(page.locator('#record-celebration')).toBeHidden();
+  await page.locator('#pause').click();
+  await page.locator('#leave-ranked').click();
+  await expect(page.locator('#best')).toHaveText('1077520');
+  await page.locator('#launch').click();
+  await expect(page.locator('#best-label')).toHaveText('CASUAL BEST');
+  await expect(page.locator('#best')).toHaveText('012345');
+  await page.reload();
+  await expect(page.locator('#best')).toHaveText('1077520');
+  expect(errors).toEqual([]);
+});
+
+test('live verified records and leaderboard overtakes celebrate once without blocking flight controls', async ({ page, isMobile }) => {
+  const ranked = await mockRanked(page, { personalBest: 500, entries: [
+    { rank: 1, username: 'First_Pilot', score: 1500 },
+    { rank: 2, username: 'Second_Pilot', score: 900 },
+    { rank: 3, username: 'Portrait_Pilot', score: 500 },
+  ] });
+  const { errors } = await openArcade(page);
+  await page.locator('#ranked').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  ranked.game.score = 501;
+  ranked.snapshot();
+  await expect(page.locator('#record-title')).toHaveText('NEW PERSONAL BEST');
+  await expect(page.locator('#record-eyebrow')).toContainText('FINISH TO SAVE');
+  const first = await page.locator('#record-celebration').getAttribute('data-sequence');
+  ranked.game.score = 900;
+  ranked.snapshot();
+  await expect(page.locator('#best')).toHaveText('000900');
+  expect(await page.locator('#record-celebration').getAttribute('data-sequence')).toBe(first);
+  ranked.game.score = 901;
+  ranked.snapshot();
+  await expect(page.locator('#record-title')).toHaveText('TOP 2 PACE');
+  await expect(page.locator('#record-detail')).toHaveText('1 PILOT PASSED');
+  ranked.game.score = 1501;
+  ranked.snapshot();
+  await expect(page.locator('#record-celebration')).toHaveAttribute('data-kind', 'leader');
+  await expect(page.locator('#record-title')).toHaveText('NUMBER ONE PACE');
+  const sequence = await page.locator('#record-celebration').getAttribute('data-sequence');
+  ranked.snapshot();
+  await page.waitForTimeout(120);
+  expect(await page.locator('#record-celebration').getAttribute('data-sequence')).toBe(sequence);
+  expect(await page.locator('#record-celebration').evaluate(node => getComputedStyle(node).pointerEvents)).toBe('none');
+  if (isMobile) await page.locator('#touch-fire').tap();
+  else await page.keyboard.down('Space');
+  await expect.poll(() => ranked.inputs.some(input => (input.keys & 4) !== 0)).toBe(true);
+  if (!isMobile) await page.keyboard.up('Space');
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  expect(await page.evaluate(() => ({ scale: visualViewport.scale, text: getSelection().toString() }))).toEqual({ scale: 1, text: '' });
+  ranked.game.state = 'gameover';
+  ranked.snapshot([{ type: 'gameover', score: 1501, wave: 1 }]);
+  await expect(page.locator('#launch')).toBeDisabled();
+  await expect(page.locator('#launch-label')).toHaveText('VERIFYING RESULT...');
+  ranked.finish({ rank: 1, previousRank: 3 });
+  await expect(page.locator('#record-result')).toContainText('#3 TO #1 GLOBAL');
+  await expect(page.locator('#record-celebration')).toHaveAttribute('data-phase', 'saved');
+  await expect(page.locator('#launch')).toBeInViewport();
+  if (isMobile) await page.setViewportSize({ width: 320, height: 568 });
+  await noOverflow(page);
+  expect(errors).toEqual([]);
+});
+
+test('reduced-motion record feedback stays readable without animation and controller Start replays ranked', async ({ page }) => {
+  const ranked = await mockRanked(page, { personalBest: 500 });
+  const { errors } = await openArcade(page, { reducedMotion: true, virtualGamepad: true });
+  await connectVirtualPad(page);
+  await page.locator('#ranked').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  ranked.game.score = 600;
+  ranked.snapshot();
+  await expect(page.locator('#record-celebration')).toBeVisible();
+  await expect(page.locator('#record-title')).toHaveText('NEW PERSONAL BEST');
+  expect(await page.locator('#record-celebration').evaluate(node => node.getAnimations({ subtree: true }).length)).toBe(0);
+  ranked.finish();
+  await expect(page.locator('#result-title')).toHaveText('NEW PERSONAL BEST');
+  expect(await page.locator('#result-title').evaluate(node => node.getAnimations().length)).toBe(0);
+  const neutralPoll = await page.evaluate(() => window.__arcadePadPolls);
+  await expect.poll(() => page.evaluate(() => window.__arcadePadPolls)).toBeGreaterThan(neutralPoll);
+  await padButton(page, 9, true);
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  expect(ranked.starts).toHaveLength(2);
+  await padButton(page, 9, false);
+  expect(errors).toEqual([]);
+});
 
 async function drawnArena(page) {
   return page.locator('canvas').evaluate(canvas => {

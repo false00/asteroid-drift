@@ -16,9 +16,13 @@ Wireframe asteroids split into smaller rocks, waves build, and consecutive hits 
 | Mode | Behavior |
 | --- | --- |
 | Casual | Browser-local simulation, a personal best, and seven optional cheats. Sandbox scores remain separate from normal records. |
-| Ranked | Passkey sign-in, live server simulation, and a global top ten with one best score per account. Local and sandbox results cannot be imported. |
+| Ranked | Passkey sign-in, live server simulation, an account-wide personal best, and a global top ten with one best score per account. Local and sandbox results cannot be imported. |
 
 The renderer uses reusable geometry and typed GPU buffers. Viewport projection, including portrait play, is separate from the game model. Runtime assets and modules are self-hosted.
+
+Personal records and leaderboard overtakes earn orbital bursts, score highlights, and distinct synthesized fanfares without blocking flight controls. Live ranked pace is marked provisional; the result screen confirms records only after the server commits them. Reduced-motion preferences retain the record text without animation. The primary action after a ranked result launches another ranked flight; casual play remains a separate choice.
+
+Interrupted ranked flights offer a connection retry or an explicit new flight. Retrying preserves the unfinished run when it is still available; starting over discards only that account's expected unfinished flight. Saved personal and public records are unchanged. Restart requests share the authenticated, exact-origin, CSRF and rate-limit boundaries of starting a flight, and abandonment plus the fresh checkpoint commit atomically.
 
 ## Architecture
 
@@ -56,6 +60,8 @@ Aliases are encrypted with AES-256-GCM and account-bound associated data. Case-i
 ### Results and audit records commit together
 
 SQLite WAL transactions finalize the server result, update and prune the top ten, and enqueue the audit event together. A score is reported as saved only after the transaction succeeds. Storage failures disable mutations rather than returning a successful-looking result.
+
+Each account retains one private verified-best number, independent of the ten public leaderboard rows. It follows the passkey account across devices and is updated in the same finalization transaction. The HUD separates this ranked record from the browser-local casual best; neither local storage nor sandbox totals can update it. Existing databases initialize account bests from retained leaderboard entries, not from untrusted browser scores or discarded score history.
 
 Account activity and authoritative run summaries enter an encrypted, HMAC-chained outbox. A bounded local management CLI exports ciphertext for downstream processing. Authentication assertions, challenges, session cookies, and attachment tickets are excluded from logs.
 

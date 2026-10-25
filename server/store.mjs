@@ -29,7 +29,8 @@ export class Store {
         id TEXT PRIMARY KEY,
         handle_lookup BLOB NOT NULL UNIQUE CHECK(length(handle_lookup)=32),
         handle_cipher BLOB NOT NULL CHECK(length(handle_cipher) BETWEEN 31 AND 80),
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        personal_best INTEGER NOT NULL DEFAULT 0 CHECK(personal_best>=0 AND personal_best<=9007199254740991)
       ) STRICT;
       CREATE TABLE IF NOT EXISTS credentials (
         id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 2048),
@@ -93,6 +94,12 @@ export class Store {
     } else {
       this.db.prepare("INSERT INTO metadata(key,value) VALUES ('key_check',?)").run(this.secrets.seal('curlred-ranked-store-v1', context).toString('base64'));
     }
+    if (!this.db.prepare('PRAGMA table_info(accounts)').all().some(column => column.name === 'personal_best')) {
+      this.atomic(() => {
+        this.db.exec('ALTER TABLE accounts ADD COLUMN personal_best INTEGER NOT NULL DEFAULT 0 CHECK(personal_best>=0 AND personal_best<=9007199254740991)');
+        this.db.exec('UPDATE accounts SET personal_best=COALESCE((SELECT score FROM leaderboard WHERE account_id=accounts.id),0)');
+      });
+    }
   }
 
   close() { this.db.close(); }
@@ -103,7 +110,7 @@ export class Store {
     if (!row) return null;
     const handle = this.secrets.open(row.handle_cipher, `account:${row.id}`);
     username(handle);
-    return { id: row.id, username: handle, createdAt: row.created_at };
+    return { id: row.id, username: handle, createdAt: row.created_at, personalBest: row.personal_best };
   }
 
   available(handle) {
@@ -237,10 +244,16 @@ export class Store {
       const score = run.game.score;
       const duration = Math.floor(run.game.elapsed * 1000);
       if (!Number.isSafeInteger(score) || score < 0) throw new Error('Authoritative score is invalid.');
+      const previousBest = account.personalBest;
+      const board = this.db.prepare('SELECT account_id FROM leaderboard ORDER BY score DESC,achievement_order ASC LIMIT 10').all();
+      const previousPosition = board.findIndex(row => row.account_id === account.id);
+      const qualified = score > 0 && run.activeMs >= 2000;
+      const personalBest = Math.max(previousBest, qualified ? score : 0);
       const order = this.audit('ranked.finished', account, run.ip, {
         ...run.summary(), reason, rules: 'ranked-v1',
       });
-      if (score > 0 && run.activeMs >= 2000) {
+      if (qualified) {
+        this.db.prepare('UPDATE accounts SET personal_best=? WHERE id=?').run(personalBest, account.id);
         this.db.prepare(`INSERT INTO leaderboard(account_id,run_id,score,wave,duration_ms,achievement_order,finished_at)
           VALUES (?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
           run_id=excluded.run_id,score=excluded.score,wave=excluded.wave,duration_ms=excluded.duration_ms,
@@ -251,7 +264,12 @@ export class Store {
       this.db.prepare('DELETE FROM runs WHERE id=?').run(run.id);
       const position = this.db.prepare('SELECT account_id FROM leaderboard ORDER BY score DESC,achievement_order ASC LIMIT 10').all().findIndex(row => row.account_id === account.id);
       this.audit('leaderboard.evaluated', account, run.ip, { run_id: run.id, retained: position >= 0, rank: position >= 0 ? position + 1 : null });
-      return { score, wave: run.game.wave, durationMs: duration, rank: position >= 0 ? position + 1 : null };
+      return {
+        score, wave: run.game.wave, durationMs: duration, qualified,
+        rank: position >= 0 ? position + 1 : null, previousRank: previousPosition >= 0 ? previousPosition + 1 : null,
+        personalBest, previousBest, newPersonalBest: personalBest > previousBest,
+        rankImproved: qualified && position >= 0 && (previousPosition < 0 || position < previousPosition),
+      };
     });
   }
 

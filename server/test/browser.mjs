@@ -39,6 +39,8 @@ try {
   await page.locator('#username').fill('Verified_Pilot');
   await page.locator('#register-form button').click();
   await expect(page.locator('#pilot-name')).toHaveText('Verified_Pilot', { timeout: 15000 });
+  await expect(page.locator('#best-label')).toHaveText('RANKED BEST');
+  await expect(page.locator('#best')).toHaveText('000000');
   assert.equal((await context.cookies()).filter(cookie => cookie.name === '__Host-curlred_session').length, 1);
   await page.locator('#identity-close').click();
   await page.locator('#ranked').click();
@@ -87,7 +89,8 @@ try {
   }).toBeLessThan(0.0001);
   await phone.close();
   await expect.poll(() => run.game.state).toBe('paused');
-  await page.locator('#ranked').click();
+  await expect(page.locator('#launch-label')).toHaveText('RETRY CONNECTION');
+  await page.locator('#launch').click();
   await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
   await expect.poll(async () => {
     const box = await page.locator('#playfield').boundingBox();
@@ -115,6 +118,29 @@ try {
   await expect(page.locator('#result-eyebrow')).toHaveText('SERVER VERIFIED FLIGHT');
   assert.equal(service.store.leaderboard()[0].score, score);
   assert.equal(service.store.leaderboard()[0].username, 'Verified_Pilot');
+  assert.equal(service.store.account(run.accountId).personalBest, score);
+  await expect(page.locator('#best')).toHaveText(String(score).padStart(6, '0'));
+  await expect(page.locator('#record-result')).toContainText(score.toLocaleString());
+  await expect(page.locator('#launch-label')).toHaveText('ANOTHER RANKED FLIGHT');
+  await page.locator('#launch').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  const replay = [...service.runs.runs.values()][0];
+  assert.ok(replay && replay.id !== run.id);
+  await expect(page.locator('#ranked-badge')).toBeVisible();
+  replay.socket.close(1011, 'Local integration transport interruption');
+  await expect(page.locator('#result-title')).toHaveText('FLIGHT INTERRUPTED');
+  await expect(page.locator('#ranked-recovery-copy')).toContainText('discards unfinished progress');
+  await page.locator('#restart-ranked').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  const recovered = [...service.runs.runs.values()][0];
+  assert.ok(recovered && recovered.id !== replay.id && recovered.accountId === run.accountId);
+  assert.ok(service.store.export(0, 100).some(event => event.payload.event_action === 'ranked.abandoned'));
+  await page.locator('#pause').click();
+  await expect.poll(() => recovered.game.state).toBe('paused');
+  await page.locator('#finish-ranked').click();
+  await expect(page.locator('#launch-label')).toHaveText('ANOTHER RANKED FLIGHT');
+  await expect(page.locator('#best')).toHaveText(String(score).padStart(6, '0'));
+  assert.equal(service.store.account(run.accountId).personalBest, score);
   clearInterval(timer);
   timer = null;
   await service.app.close();
@@ -122,8 +148,16 @@ try {
   await service.app.listen({ host: '127.0.0.1', port: 4191 });
   await page.reload();
   await expect(page.locator('#account')).toHaveText('Verified_Pilot');
+  await expect(page.locator('#best')).toHaveText(String(score).padStart(6, '0'));
+  const recordPhone = await browser.newContext({ ...devices['iPhone 13'], extraHTTPHeaders: { 'x-forwarded-for': '198.51.100.22' } });
+  await recordPhone.addCookies(await context.cookies());
+  const recordMobile = await recordPhone.newPage();
+  await recordMobile.goto(config.origin);
+  await expect(recordMobile.locator('#best-label')).toHaveText('RANKED BEST');
+  await expect(recordMobile.locator('#best')).toHaveText(String(score).padStart(6, '0'));
+  await recordPhone.close();
   await page.locator('#account').click();
-  await expect(page.locator('#leaderboard-list')).toContainText(String(score));
+  await expect(page.locator('#leaderboard-list')).toContainText(score.toLocaleString());
   await page.locator('#signout').click();
   await expect(page.locator('#signed-out')).toBeVisible();
   await page.locator('#signin').click();
@@ -138,7 +172,7 @@ try {
   const bytes = await readFile(config.databasePath);
   assert.equal(bytes.includes(Buffer.from('Verified_Pilot')), false);
   assert.deepEqual(errors.filter(message => !message.includes('400 (Bad Request)')), []);
-  console.info('Verified real-browser resident passkeys, full-area ranked resizing and desktop/phone handoff, forged-score rejection, atomic persistence across restart, safe records, sign-in and fresh-passkey deletion.');
+  console.info('Verified real-browser passkeys, full-area handoff, ranked replay and recovery, account bests across restart/phone, forged-score rejection, safe records and fresh-passkey deletion.');
 } finally {
   clearInterval(timer);
   await browser?.close();

@@ -1,5 +1,6 @@
 import { Game, wrappedDelta } from './engine.mjs?v=20261024.7';
-import { AccountError } from './identity.mjs?v=20261024.7';
+import { AccountError } from './identity.mjs?v=20261024.8';
+import { FlightRecords, isRankedResult } from './records.mjs?v=20261024.8';
 import { DEFAULT_VIEWPORT, RANKED_SCALE, arenaForViewport, isRankedArena, viewportForSize } from './arena.mjs?v=20261024.7';
 
 const TAU = Math.PI * 2;
@@ -7,8 +8,8 @@ const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 const lerpWrapped = (a, b, amount, size) => ((a + wrappedDelta(b - a, size) * amount) % size + size) % size;
 
 export class RankedClient {
-  constructor({ identity, onState, onFinish, notify, onFrame }) {
-    Object.assign(this, { identity, onState, onFinish, notify, onFrame });
+  constructor({ identity, onState, onFinish, onFailure, notify, onFrame }) {
+    Object.assign(this, { identity, onState, onFinish, onFailure, notify, onFrame });
     this.active = false;
     this.finished = false;
     this.socket = null;
@@ -41,18 +42,25 @@ export class RankedClient {
     this.lastViewportSent = now;
   }
 
-  async start() {
+  async start({ restart = false } = {}) {
     this.runId = null;
     this.accountId = this.identity.session.user.id;
     this.active = true;
     this.finished = false;
+    this.result = null;
+    this.records = null;
     this.snapshots = [];
     this.controlModes.clear();
     const arena = arenaForViewport(this.viewport.width, this.viewport.height);
     this.game = new Game(arena.width, arena.height, Math.random, { resumeProtection: false, fixedScale: RANKED_SCALE });
     this.game.state = 'paused';
+    const [session, entries] = await Promise.all([this.identity.request('/api/session'), this.identity.readScores()]);
+    if (!session.authenticated || session.user.id !== this.accountId) throw new AccountError('authentication_required');
+    this.identity.setSession(session);
+    this.records = new FlightRecords({ best: session.user.personalBest, username: session.user.username, entries });
     const { run: existing } = await this.identity.request('/api/ranked/current');
-    const { run } = existing ? { run: existing } : await this.identity.request('/api/ranked/start', { viewport: this.viewport });
+    const { run } = restart ? await this.identity.request('/api/ranked/restart', { runId: existing?.id ?? null, viewport: this.viewport })
+      : existing ? { run: existing } : await this.identity.request('/api/ranked/start', { viewport: this.viewport });
     this.runId = run.id;
     await this.connect();
     this.action('resume');
@@ -71,6 +79,7 @@ export class RankedClient {
     this.lastViewportSent = -Infinity;
     await new Promise((resolve, reject) => {
       let attached = false;
+      let invalidResponse = false;
       const timeout = setTimeout(() => { socket.close(); reject(new AccountError('connection_lost')); }, 10000);
       socket.addEventListener('open', () => {
         if (socket !== this.socket) return;
@@ -79,7 +88,7 @@ export class RankedClient {
         this.lastViewportSent = performance.now();
       });
       socket.addEventListener('message', event => {
-        if (socket !== this.socket) return;
+        if (socket !== this.socket || this.finished) return;
         try {
           if (typeof event.data !== 'string' || event.data.length > 65536) throw new Error('Invalid ranked response.');
           const message = JSON.parse(event.data);
@@ -89,8 +98,13 @@ export class RankedClient {
             resolve();
           } else if (message.type === 'snapshot') this.receive(message);
           else if (message.type === 'finished') {
-            if (!Number.isSafeInteger(message.result?.score) || message.result.score < 0) throw new Error('Invalid ranked result.');
+            if (!isRankedResult(message.result)) throw new Error('Invalid ranked result.');
+            if (this.finished) return;
             this.finished = true;
+            this.result = message.result;
+            this.snapshots = [];
+            this.game.score = message.result.score;
+            this.game.wave = message.result.wave;
             this.game.state = 'gameover';
             this.onFinish(message.result);
           } else if (message.type === 'paused') {
@@ -100,23 +114,28 @@ export class RankedClient {
           } else if (message.type === 'unavailable') {
             this.game.state = 'paused';
             this.onState('paused');
-            this.notify('Ranked flight is unavailable. No unverified score is reported as saved.');
+            this.onFailure(new AccountError('ranked_unavailable'));
           }
         } catch {
           console.error('The ranked server returned an invalid response; flight was stopped.');
+          invalidResponse = true;
           socket.close(4002, 'Invalid ranked response');
           this.game.state = 'paused';
           this.onState('paused');
-          this.notify('The ranked response could not be verified. Please reload before retrying.');
+          this.onFailure(new AccountError('invalid_ranked_response'));
         }
       });
       socket.addEventListener('close', event => {
         clearTimeout(timeout);
-        if (!attached) reject(new AccountError(event.code === 4001 ? 'authentication_required' : 'connection_lost'));
+        const failure = event.code === 4001 ? 'authentication_required' : event.code === 4010 ? 'ranked_unavailable' : event.code === 4000 ? 'run_not_active' : 'connection_lost';
+        if (!attached) {
+          reject(new AccountError(failure));
+          return;
+        }
         if (socket !== this.socket || !this.active || this.finished) return;
         this.game.state = 'paused';
         this.onState('paused');
-        this.notify(event.code === 4001 ? 'Sign in again with your passkey, then resume this ranked flight within ten minutes.' : 'Ranked connection lost. Use Back to flight to reconnect within ten minutes.');
+        if (!invalidResponse) this.onFailure(new AccountError(failure));
       });
       socket.addEventListener('error', () => {
         console.warn('The ranked websocket could not connect; casual flight remains available.');
@@ -196,5 +215,6 @@ export class RankedClient {
     this.snapshots = [];
     this.runId = null;
     this.sentViewport = null;
+    this.records = null;
   }
 }
