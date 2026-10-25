@@ -139,6 +139,7 @@ async function mockRanked(page, { personalBest = 0, entries = [] } = {}) {
   const inputs = [];
   const starts = [];
   const restarts = [];
+  const pauses = [];
   let current = null;
   let ticketFailure = false;
   const viewports = [];
@@ -199,6 +200,7 @@ async function mockRanked(page, { personalBest = 0, entries = [] } = {}) {
         game.state = 'playing';
         snapshot();
       } else if (message.type === 'pause') {
+        pauses.push(message.reason);
         game.state = 'paused';
         snapshot();
       } else if (message.type === 'viewport') {
@@ -222,9 +224,9 @@ async function mockRanked(page, { personalBest = 0, entries = [] } = {}) {
     return result;
   };
   return {
-    game, inputs, starts, restarts, viewports, snapshot, finish,
+    game, inputs, starts, restarts, pauses, viewports, snapshot, finish,
     failNextTicket: () => { ticketFailure = true; },
-    disconnect: () => socket.close({ code: 1011, reason: 'Local test transport interruption' }),
+    disconnect: (code = 1011) => socket.close({ code, reason: 'Local test transport interruption' }),
   };
 }
 
@@ -256,6 +258,61 @@ test('ranked failures offer a non-destructive retry and an explicit new-flight r
   await expect(page.locator('#best')).toHaveText('000500');
   await expect(page.locator('#record-celebration')).toBeHidden();
   expect(errors.filter(message => !message.includes('404 (Not Found)'))).toEqual([]);
+});
+
+test('ranked pause diagnostics distinguish manual, focus, tab, help, account and console actions', async ({ page }) => {
+  const ranked = await mockRanked(page);
+  const { errors } = await openArcade(page);
+  await page.locator('#ranked').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  await page.keyboard.press('p');
+  await expect.poll(() => ranked.pauses.at(-1)).toBe('player');
+  await page.locator('#launch').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  await page.evaluate(() => dispatchEvent(new Event('blur')));
+  await expect.poll(() => ranked.pauses.at(-1)).toBe('blur');
+  await page.locator('#launch').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect.poll(() => ranked.pauses.at(-1)).toBe('hidden');
+  await page.evaluate(() => {
+    delete document.hidden;
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await page.locator('#launch').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  await page.locator('#help').click();
+  await expect.poll(() => ranked.pauses.at(-1)).toBe('manual');
+  await page.locator('#launch').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  await page.locator('#account').click();
+  await expect.poll(() => ranked.pauses.at(-1)).toBe('account');
+  await page.locator('#identity-close').click();
+  await page.locator('#launch').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  await page.locator('#console').click();
+  await expect.poll(() => ranked.pauses.at(-1)).toBe('console');
+  expect(ranked.starts).toHaveLength(1);
+  expect(errors).toEqual([]);
+});
+
+test('ranked recovery distinguishes a device handoff from a slow-receiver closure', async ({ page }) => {
+  const ranked = await mockRanked(page);
+  const { errors } = await openArcade(page);
+  await page.locator('#ranked').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  for (const [code, copy] of [[4003, 'another window or device'], [4004, 'could not keep up']]) {
+    ranked.disconnect(code);
+    await expect(page.locator('#result-title')).toHaveText('FLIGHT INTERRUPTED');
+    await expect(page.locator('#result-copy')).toContainText(copy);
+    await page.locator('#launch').click();
+    await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  }
+  expect(ranked.starts).toHaveLength(1);
+  expect(errors).toEqual([]);
 });
 
 test('ranked records update immediately and the main replay button stays ranked without touching casual best', async ({ page }) => {

@@ -129,6 +129,9 @@ try {
   await expect(page.locator('#ranked-badge')).toBeVisible();
   replay.socket.close(1011, 'Local integration transport interruption');
   await expect(page.locator('#result-title')).toHaveText('FLIGHT INTERRUPTED');
+  const closure = service.store.export(0, 100).find(event =>
+    event.payload.event_action === 'ranked.connection_closed' && event.payload.details.close_code === 1011);
+  assert.equal(closure?.payload.details.reason, 'peer_closed');
   await expect(page.locator('#ranked-recovery-copy')).toContainText('discards unfinished progress');
   await page.locator('#restart-ranked').click();
   await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');

@@ -7,6 +7,7 @@ import { ApiError, Budget, base64url, digest, equal, integer, object, token } fr
 export const ARENA = Object.freeze({ width: 960, height: 640, hz: 120 });
 export const LEASE_MS = 10 * 60 * 1000;
 const EMPTY_INPUT = Object.freeze({ left: false, right: false, thrust: 0, brake: false, fire: false, shield: false, aim: null });
+const CLIENT_PAUSES = new Set(['player', 'blur', 'hidden', 'pagehide', 'console', 'manual', 'account', 'graphics', 'viewport', 'controller_lost']);
 const random = () => randomBytes(4).readUInt32BE() / 4294967296;
 const visibleFields = ['state', 'width', 'height', 'scale', 'score', 'lives', 'wave', 'elapsed', 'combo', 'comboTime', 'shieldTime', 'shieldCooldown', 'tripleTime', 'waveBanner', 'waveDelay', 'ship', 'asteroids', 'bullets', 'pickups', 'stats'];
 const gameState = game => Object.fromEntries(visibleFields.map(key => [key, game[key]]));
@@ -84,10 +85,12 @@ export class Runs {
     this.onStorageFailure = onStorageFailure;
     this.runs = new Map();
     this.tickets = new Map();
+    this.connections = new WeakMap();
     this.budget = new Budget({ maximum: 256, now });
     this.previous = monotonic();
     this.accumulator = 0;
     this.available = true;
+    this.shuttingDown = false;
     for (const saved of store.recover()) {
       const account = store.account(saved.accountId);
       if (!account) continue;
@@ -160,7 +163,7 @@ export class Runs {
       previous.finished = true;
       this.runs.delete(previous.id);
       for (const [id, ticket] of this.tickets) if (ticket.runId === previous.id) this.tickets.delete(id);
-      previous.socket?.close(4000, 'Flight restarted by its pilot');
+      this.close(previous.socket, 4000, 'Flight restarted by its pilot', 'player_restart');
     }
     this.runs.set(run.id, run);
     return this.info(run);
@@ -181,14 +184,18 @@ export class Runs {
     let run = null;
     let messages = 0;
     let windowAt = this.now();
+    const connection = { openedAt: this.now(), receivedAt: this.now(), received: 0, sent: 0, attached: false, closeReason: null, closeCode: null, buffered: null };
+    this.connections.set(socket, connection);
     const timeout = setTimeout(() => {
-      if (!run) socket.close(4000, 'Attach timeout');
+      if (!run) this.close(socket, 4000, 'Attach timeout', 'attach_timeout');
     }, 3000);
     socket.on('error', () => {
       console.warn('A ranked websocket transport failed.');
     });
     socket.on('message', data => {
       try {
+        connection.received++;
+        connection.receivedAt = this.now();
         if (!this.available) throw new ApiError(503, 'ranked_unavailable');
         if (this.now() - windowAt >= 1000) { messages = 0; windowAt = this.now(); }
         if (++messages > 45 || data.length > 1024) throw new ApiError(429, 'input_rate_limited');
@@ -204,9 +211,10 @@ export class Runs {
           run = this.runs.get(ticket.runId);
           if (!run || run.accountId !== session.accountId || !this.store.session(session.value)) throw new ApiError(401, 'authentication_required');
           this.resize(run, message.viewport ?? DEFAULT_VIEWPORT);
-          if (run.socket) run.socket.close(4003, 'Connected elsewhere');
+          if (run.socket) this.close(run.socket, 4003, 'Connected elsewhere', 'connected_elsewhere');
           clearTimeout(timeout);
           run.socket = socket;
+          connection.attached = true;
           run.session = session;
           run.sequence = 0;
           run.ip = ip;
@@ -219,7 +227,7 @@ export class Runs {
         if (run.socket !== socket || run.finished) throw new ApiError(409, 'run_not_active');
         if (!this.store.session(session.value)) {
           this.pause(run, 'authentication_expired');
-          socket.close(4001, 'Sign in again');
+          this.close(socket, 4001, 'Sign in again', 'authentication_expired');
           return;
         }
         if (message.type === 'input') {
@@ -234,9 +242,12 @@ export class Runs {
           object(message, ['type', 'viewport']);
           if (this.resize(run, message.viewport)) this.snapshot(run);
         } else {
-          object(message, ['type']);
+          const pausing = message.type === 'pause';
+          object(message, pausing ? ['type', 'reason'] : ['type'], ['type']);
+          const reason = Object.hasOwn(message, 'reason') ? message.reason : 'player';
+          if (pausing && !CLIENT_PAUSES.has(reason)) throw new ApiError(400, 'invalid_pause_reason');
           this.budget.take(`${run.id}:actions`, 20, 60000);
-          if (message.type === 'pause') this.pause(run, 'player');
+          if (pausing) this.pause(run, reason);
           else if (message.type === 'resume') this.resume(run);
           else if (message.type === 'finish') this.finish(run, 'player_finished');
           else throw new ApiError(400, 'invalid_action');
@@ -250,29 +261,57 @@ export class Runs {
             if (run) this.send(run, { type: 'unavailable', reason: error.code });
             return;
           }
-          socket.close(4002, 'Invalid ranked message');
+          this.close(socket, 4002, 'Invalid ranked message', 'input_rejected');
         } else this.storageFailure(error);
       }
     });
-    socket.on('close', () => {
+    socket.on('close', (code, reason) => {
       clearTimeout(timeout);
-      if (run && run.socket === socket && !run.finished) {
-        run.socket = null;
-        try { this.pause(run, 'disconnected'); }
-        catch (error) { this.storageFailure(error); }
-      }
+      if (this.shuttingDown) return;
+      try {
+        const reportedInvalid = code === 4002 && Buffer.isBuffer(reason) && reason.equals(Buffer.from('Invalid ranked response'));
+        const closedByPeer = reportedInvalid ? 'peer_invalid_response' : code === 1006 ? 'transport_lost' : code === 1000 ? 'peer_normal' : 'peer_closed';
+        this.store.audit('ranked.connection_closed', run ? this.actor(run) : session.account, ip, {
+          run_id: run?.id || null, close_code: integer(code, 1000, 4999),
+          reason: connection.closeReason || closedByPeer, attached: connection.attached,
+          server_initiated: connection.closeReason !== null, requested_close_code: connection.closeCode,
+          connected_ms: Math.max(0, this.now() - connection.openedAt),
+          last_message_age_ms: Math.max(0, this.now() - connection.receivedAt),
+          last_input_age_ms: run ? Math.max(0, this.now() - run.inputAt) : null,
+          buffered_bytes: connection.buffered ?? socket.bufferedAmount,
+          messages_received: connection.received, messages_sent: connection.sent,
+          score: run?.game.score ?? 0, wave: run?.game.wave ?? 0,
+        });
+        if (run && run.socket === socket && !run.finished) {
+          run.socket = null;
+          this.pause(run, 'disconnected');
+        }
+      } catch (error) { this.storageFailure(error); }
     });
+  }
+
+  close(socket, code, message, reason) {
+    if (!socket) return;
+    const connection = this.connections.get(socket);
+    if (connection && connection.closeReason === null) {
+      connection.closeReason = reason;
+      connection.closeCode = code;
+      connection.buffered = socket.bufferedAmount;
+    }
+    socket.close(code, message);
   }
 
   send(run, payload) {
     if (!run.socket || run.socket.readyState !== 1) return false;
     if (run.socket.bufferedAmount > 131072) {
-      run.socket.close(4004, 'Connection too slow');
+      this.close(run.socket, 4004, 'Connection too slow', 'backpressure');
       return false;
     }
     const body = JSON.stringify(payload);
     if (Buffer.byteLength(body) > 65536) throw new Error('Ranked output exceeds its fixed budget.');
     run.socket.send(body);
+    const connection = this.connections.get(run.socket);
+    if (connection) connection.sent++;
     return true;
   }
 
@@ -326,7 +365,7 @@ export class Runs {
     this.snapshot(run);
     this.send(run, { type: 'finished', result });
     this.runs.delete(run.id);
-    run.socket?.close(1000, 'Score verified');
+    this.close(run.socket, 1000, 'Score verified', 'verified_result');
   }
 
   remove(accountId) {
@@ -334,7 +373,7 @@ export class Runs {
     if (!run) return;
     run.finished = true;
     this.runs.delete(run.id);
-    run.socket?.close(4001, 'Account signed out');
+    this.close(run.socket, 4001, 'Account signed out', 'account_removed');
   }
 
   storageFailure() {
@@ -345,7 +384,7 @@ export class Runs {
       run.game.pause();
       run.input = EMPTY_INPUT;
       this.send(run, { type: 'unavailable', reason: 'storage_failure' });
-      run.socket?.close(4010, 'Ranked storage unavailable');
+      this.close(run.socket, 4010, 'Ranked storage unavailable', 'storage_unavailable');
     }
     this.onStorageFailure();
   }
@@ -386,7 +425,7 @@ export class Runs {
             this.store.db.prepare('DELETE FROM runs WHERE id=?').run(run.id);
           });
           run.finished = true;
-          run.socket?.close(4000, 'Run expired');
+          this.close(run.socket, 4000, 'Run expired', 'run_expired');
           this.runs.delete(run.id);
           continue;
         }
@@ -394,7 +433,7 @@ export class Runs {
         if (now - run.sessionAt >= 15000) {
           if (!this.store.session(run.session?.value)) {
             this.pause(run, 'authentication_expired');
-            run.socket?.close(4001, 'Sign in again');
+            this.close(run.socket, 4001, 'Sign in again', 'authentication_expired');
             continue;
           }
           this.store.touchSession(run.session.hash);
@@ -413,6 +452,7 @@ export class Runs {
   }
 
   shutdown() {
+    this.shuttingDown = true;
     for (const run of this.runs.values()) this.pause(run, 'server_shutdown');
   }
 }

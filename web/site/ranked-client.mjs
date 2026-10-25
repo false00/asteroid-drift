@@ -1,5 +1,5 @@
 import { Game, wrappedDelta } from './engine.mjs?v=20261024.7';
-import { AccountError } from './identity.mjs?v=20261024.8';
+import { AccountError } from './identity.mjs?v=20261024.9';
 import { FlightRecords, isRankedResult } from './records.mjs?v=20261024.8';
 import { DEFAULT_VIEWPORT, RANKED_SCALE, arenaForViewport, isRankedArena, viewportForSize } from './arena.mjs?v=20261024.7';
 
@@ -127,7 +127,9 @@ export class RankedClient {
       });
       socket.addEventListener('close', event => {
         clearTimeout(timeout);
-        const failure = event.code === 4001 ? 'authentication_required' : event.code === 4010 ? 'ranked_unavailable' : event.code === 4000 ? 'run_not_active' : 'connection_lost';
+        const failure = event.code === 4001 ? 'authentication_required' : event.code === 4010 ? 'ranked_unavailable'
+          : event.code === 4000 ? 'run_not_active' : event.code === 4003 ? 'connected_elsewhere'
+          : event.code === 4004 ? 'slow_connection' : 'connection_lost';
         if (!attached) {
           reject(new AccountError(failure));
           return;
@@ -197,10 +199,10 @@ export class RankedClient {
     }));
   }
 
-  action(type) {
+  action(type, reason = 'player') {
     if (this.socket?.readyState !== WebSocket.OPEN) throw new AccountError('connection_lost');
     if (type === 'resume') this.syncViewport(performance.now(), true);
-    this.socket.send(JSON.stringify({ type }));
+    this.socket.send(JSON.stringify(type === 'pause' ? { type, reason } : { type }));
   }
 
   async resume() {

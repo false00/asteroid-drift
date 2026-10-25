@@ -193,7 +193,7 @@ export async function buildApp(config) {
     reply.code(status).send({ error: code });
   });
 
-  app.get('/health', async () => ({ service: 'asteroid-drift', build: '1.2.0', ranked: mutationsAvailable && runs.available, auth_enabled: Boolean(config.test || config.authEnabled) }));
+  app.get('/health', async () => ({ service: 'asteroid-drift', build: '1.2.1', ranked: mutationsAvailable && runs.available, auth_enabled: Boolean(config.test || config.authEnabled) }));
   app.get('/api/session', async request => view(session(request)));
   app.get('/api/leaderboard', async () => ({ entries: store.leaderboard(), rules: 'ranked-v1', maximum: 10 }));
 
@@ -342,7 +342,7 @@ export async function buildApp(config) {
     const run = runs.mine(auth.accountId);
     if (run) {
       runs.pause(run, 'signed_out');
-      run.socket?.close(4001, 'Signed out');
+      runs.close(run.socket, 4001, 'Signed out', 'signed_out');
     }
     store.atomic(() => {
       store.audit('session.signed_out', auth.account, request.clientIP);

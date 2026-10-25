@@ -73,6 +73,8 @@ Requests and websocket messages have strict schemas, size limits, and rate budge
 
 The backend is a single process with eight playing rooms and sixteen total rooms. Active play has no duration cap, but missing input, stalled scheduling, slow receivers, and disconnected runs have bounded behavior. Checkpoints and graceful shutdown preserve unfinished runs; an unexpected crash can lose up to 30 seconds of unfinished progress.
 
+Encrypted connection diagnostics retain close codes, server close decisions, bounded queue/message counts, and last-message timing. Allowlisted pause reasons distinguish manual controls from focus loss, hidden tabs, and game menus. Raw socket-close text, attachment tickets, and input payloads are not recorded. A missing close frame is classified as an unattributed transport loss, not proof that the browser or network caused it.
+
 ## Run locally
 
 Requires **Node.js 24+**, npm, and a WebGL2-capable browser. SQLite uses a native module; platforms without a matching prebuilt binary need a C++ build toolchain and Python.

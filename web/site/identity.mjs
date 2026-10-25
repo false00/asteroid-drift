@@ -21,6 +21,8 @@ const messages = {
   run_exists: 'You already have a ranked flight. Resume or finish it first.',
   api_unavailable: 'Ranked accounts are offline. Casual flight and your local best still work.',
   connection_lost: 'The ranked connection was interrupted. Reconnect within ten minutes to continue.',
+  connected_elsewhere: 'This flight was connected in another window or device. Retry here to resume the same flight; its progress is preserved.',
+  slow_connection: 'The ranked stream could not keep up with the connection. Your flight is paused; retry to continue within ten minutes.',
   invalid_viewport: 'This playfield shape is outside the supported ranked range. Adjust the window or orientation; casual flight remains available.',
   run_not_found: 'That unfinished flight is no longer available. Retry to find your current flight, or start a new ranked flight.',
   run_not_active: 'This flight is no longer active. Retry the connection, or start a new ranked flight.',

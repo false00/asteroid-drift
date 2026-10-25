@@ -1,10 +1,10 @@
 import * as THREE from './vendor/three.module.js';
 import { Game, SHIELD_RECHARGE, CHEATS } from './engine.mjs?v=20261024.7';
 import { Synth, Haptics, FrameRateMeter } from './feedback.mjs?v=20261024.8';
-import { GameplayTelemetry } from './telemetry.mjs?v=20261024.8';
+import { GameplayTelemetry } from './telemetry.mjs?v=20261024.9';
 import { GamepadInput, EMPTY_GAMEPAD_INPUT } from './gamepad.mjs?v=20261024.5';
-import { Identity, AccountError } from './identity.mjs?v=20261024.8';
-import { RankedClient } from './ranked-client.mjs?v=20261024.8';
+import { Identity, AccountError } from './identity.mjs?v=20261024.9';
+import { RankedClient } from './ranked-client.mjs?v=20261024.9';
 import { FlightRecords } from './records.mjs?v=20261024.8';
 import { FullscreenControls, editable } from './fullscreen.mjs?v=20261024.5';
 
@@ -323,7 +323,7 @@ let controllerAudioGesture = false;
 let resizeView = () => {};
 const identity = new Identity({
   notify,
-  onPause: () => { pauseGame(); clearInput(); },
+  onPause: () => { pauseGame('account'); clearInput(); },
   onChange: session => {
     if (ranked.active && (!session.authenticated || ranked.accountId !== session.user.id)) leaveRanked();
     updateMenuActions();
@@ -501,7 +501,7 @@ function processController(now) {
   }
   if (state.lost) {
     const paused = usingController && game.state === 'playing';
-    if (paused) pauseGame();
+    if (paused) pauseGame('controller_lost');
     controller.suppressUntilNeutral();
     controllerInput = EMPTY_GAMEPAD_INPUT;
     usingController = false;
@@ -706,9 +706,9 @@ function showMenu(mode) {
 function pauseGame(reason = 'pause') {
   if (!game.pause()) return;
   if (ranked.active) {
-    try { ranked.action('pause'); }
+    try { ranked.action('pause', reason === 'pause' ? 'player' : reason); }
     catch (error) { rankedFailure(error); }
-  } else telemetry.flush(reason, game);
+  } else telemetry.flush(['hidden', 'console'].includes(reason) ? reason : 'pause', game);
   clearInput();
   clearCelebration();
   synth.play('pause');
@@ -786,7 +786,7 @@ function showManual() {
     launch();
     return;
   }
-  if (ranked.active) pauseGame();
+  if (ranked.active) pauseGame('manual');
   else if (game.pause()) telemetry.flush('pause', game);
   clearInput();
   showMenu('manual');
@@ -825,7 +825,7 @@ function showConsole(event) {
     return;
   }
   consoleReturnState = game.state;
-  if (ranked.active) pauseGame();
+  if (ranked.active) pauseGame('console');
   else if (game.pause()) telemetry.flush('console', game);
   clearInput();
   haptics.activate(event);
@@ -1132,7 +1132,7 @@ function releasePointer(event) {
   $('touch-shield').classList.toggle('active', actions.includes('shield'));
 }
 for (const event of ['pointerup', 'pointercancel', 'lostpointercapture']) addEventListener(event, releasePointer);
-addEventListener('blur', () => { clearInput(); pauseGame(); });
+addEventListener('blur', () => { clearInput(); pauseGame('blur'); });
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) { clearInput(); pauseGame('hidden'); }
 });
@@ -1165,7 +1165,7 @@ if (view) {
       try { ranked.setViewport(rect.width, rect.height); }
       catch (error) {
         if (!(error instanceof AccountError)) throw error;
-        pauseGame();
+        pauseGame('viewport');
         rankedFailure(error);
       }
     } else game.resize(rect.width, rect.height);
@@ -1185,7 +1185,7 @@ if (view) {
     event.preventDefault();
     graphicsLost = true;
     clearInput();
-    pauseGame();
+    pauseGame('graphics');
     $('launch').disabled = true;
     $('system-status').textContent = 'GRAPHICS INTERRUPTED';
     notify('Graphics were interrupted. Your flight is paused while the browser restores them.', 0);
@@ -1242,7 +1242,7 @@ if (view) {
   addEventListener('pagehide', () => {
     if (!ranked.active) { telemetry.flush('pagehide', game); telemetry.beacon(); }
     clearInput();
-    pauseGame();
+    pauseGame('pagehide');
     cancelAnimationFrame(frame);
     frame = 0;
   });

@@ -9,7 +9,12 @@ import { RANKED_AREA, RANKED_SCALE } from '../../web/site/arena.mjs';
 class Socket extends EventEmitter {
   constructor() { super(); this.readyState = 1; this.bufferedAmount = 0; this.messages = []; }
   send(value) { this.messages.push(JSON.parse(value)); }
-  close(code) { this.code = code; this.readyState = 3; this.emit('close'); }
+  close(code = 1000, reason = '') {
+    if (this.readyState === 3) return;
+    this.code = code;
+    this.readyState = 3;
+    this.emit('close', code, Buffer.from(reason));
+  }
   input(value) { this.emit('message', Buffer.from(JSON.stringify(value))); }
 }
 
@@ -42,6 +47,89 @@ test('ranked controls accept only quantized controls, not score/dt/positions/che
   for (const thrust of [-1, 256, Infinity, NaN, '255', 1.2]) assert.throws(() => controls({ ...valid, thrust }));
   assert.throws(() => controls({ ...valid, aim: 65536 }));
   assert.throws(() => controls({ ...valid, keys: 32 }));
+});
+
+test('transport close diagnostics preserve the unfinished flight and exclude untrusted close text', t => {
+  const { store, socket, run, advance } = rig(t);
+  socket.input({ type: 'resume' });
+  run.game.score = 42000;
+  advance(3000);
+  socket.close(1006, 'private-token-and-url-must-not-be-recorded');
+  const events = store.export(0, 100).map(event => event.payload);
+  const closed = events.find(event => event.event_action === 'ranked.connection_closed');
+  assert.equal(closed.details.close_code, 1006);
+  assert.equal(closed.details.reason, 'transport_lost');
+  assert.equal(closed.details.server_initiated, false);
+  assert.equal(closed.details.requested_close_code, null);
+  assert.equal(closed.details.attached, true);
+  assert.equal(closed.details.connected_ms, 3000);
+  assert.equal(closed.details.last_message_age_ms, 3000);
+  assert.equal(closed.details.score, 42000);
+  assert.ok(closed.details.messages_received >= 2 && closed.details.messages_sent >= 2);
+  assert.ok(!JSON.stringify(events).includes('private-token-and-url'));
+  assert.equal(run.game.score, 42000);
+  assert.equal(run.game.state, 'paused');
+  assert.ok(store.db.prepare('SELECT id FROM runs WHERE id=?').get(run.id));
+  assert.equal(store.leaderboard().length, 0);
+});
+
+test('backpressure records the server close decision and queue size without increasing its limit', t => {
+  const { store, socket, run, pool } = rig(t);
+  socket.input({ type: 'resume' });
+  socket.bufferedAmount = 131073;
+  assert.equal(pool.send(run, { type: 'snapshot' }), false);
+  const closed = store.export(0, 100).find(event => event.payload.event_action === 'ranked.connection_closed').payload;
+  assert.equal(socket.code, 4004);
+  assert.equal(closed.details.reason, 'backpressure');
+  assert.equal(closed.details.server_initiated, true);
+  assert.equal(closed.details.requested_close_code, 4004);
+  assert.equal(closed.details.buffered_bytes, 131073);
+  assert.equal(run.game.state, 'paused');
+});
+
+test('peer-reported invalid snapshots are classified without keeping arbitrary close reasons', t => {
+  const { store, socket } = rig(t);
+  socket.close(4002, 'Invalid ranked response');
+  const closed = store.export(0, 100).find(event => event.payload.event_action === 'ranked.connection_closed').payload;
+  assert.equal(closed.details.reason, 'peer_invalid_response');
+  assert.equal(closed.details.close_code, 4002);
+});
+
+test('legacy manual pauses and allowlisted client pause sources remain distinct and do not advance play', t => {
+  const { store, socket, run } = rig(t);
+  const reasons = ['player', 'blur', 'hidden', 'pagehide', 'console', 'manual', 'account', 'graphics', 'viewport', 'controller_lost'];
+  for (const reason of reasons) {
+    socket.input({ type: 'resume' });
+    socket.input(reason === 'player' ? { type: 'pause' } : { type: 'pause', reason });
+    assert.equal(run.game.state, 'paused');
+    assert.equal(run.game.score, 0);
+    assert.equal(run.ticks, 0);
+  }
+  const paused = store.export(0, 100).filter(event => event.payload.event_action === 'ranked.paused');
+  assert.deepEqual(paused.map(event => event.payload.details.reason), reasons);
+});
+
+test('unrecognized pause metadata is rejected rather than repaired or accepted as authority', t => {
+  for (const reason of [null, 'unknown', 'server_lag', 'authentication_expired', { score: 99999 }]) {
+    const { store, socket } = rig(t);
+    socket.input({ type: 'pause', reason });
+    assert.equal(socket.code, 4002);
+    const rejected = store.export(0, 100).find(event => event.payload.event_action === 'ranked.input_rejected');
+    assert.equal(rejected.payload.details.reason, 'invalid_pause_reason');
+    assert.equal(store.leaderboard().length, 0);
+  }
+});
+
+test('normal verified completion is distinguished from an unexplained disconnect', t => {
+  const { store, socket, run, pool } = rig(t);
+  run.game.score = 500;
+  run.activeMs = 5000;
+  pool.finish(run, 'player_finished');
+  const closed = store.export(0, 100).find(event => event.payload.event_action === 'ranked.connection_closed').payload;
+  assert.equal(closed.details.reason, 'verified_result');
+  assert.equal(closed.details.close_code, 1000);
+  assert.equal(socket.code, 1000);
+  assert.equal(store.account(run.accountId).personalBest, 500);
 });
 
 test('explicit restart replaces only the owned expected flight, invalidates its tickets, and never saves an unfinished score', t => {
