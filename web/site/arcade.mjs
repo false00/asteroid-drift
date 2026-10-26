@@ -4,9 +4,9 @@ import { Synth, Haptics, FrameRateMeter } from './feedback.mjs?v=20261024.8';
 import { GameplayTelemetry } from './telemetry.mjs?v=20261024.9';
 import { GamepadInput, EMPTY_GAMEPAD_INPUT } from './gamepad.mjs?v=20261024.5';
 import { Identity, AccountError } from './identity.mjs?v=20261024.9';
-import { RankedClient } from './ranked-client.mjs?v=20261024.9';
+import { RankedClient } from './ranked-client.mjs?v=20261025.1';
 import { FlightRecords } from './records.mjs?v=20261024.8';
-import { FullscreenControls, editable } from './fullscreen.mjs?v=20261024.5';
+import { FullscreenControls, editable } from './fullscreen.mjs?v=20261025.1';
 
 const $ = id => {
   const element = document.getElementById(id);
@@ -66,6 +66,11 @@ class FlightRenderer {
   constructor() {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'low-power' });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+    const context = this.renderer.getContext();
+    const viewportLimits = context.getParameter(context.MAX_VIEWPORT_DIMS);
+    const bufferLimit = context.getParameter(context.MAX_RENDERBUFFER_SIZE);
+    this.maxRenderWidth = Math.min(this.renderer.capabilities.maxTextureSize, bufferLimit, viewportLimits[0]);
+    this.maxRenderHeight = Math.min(this.renderer.capabilities.maxTextureSize, bufferLimit, viewportLimits[1]);
     this.renderer.setClearColor(0x090c0f);
     this.scene = new THREE.Scene();
     this.camera = new THREE.OrthographicCamera(0, 1, 0, 1, 0.1, 2000);
@@ -124,6 +129,9 @@ class FlightRenderer {
   }
 
   resize(width, height, worldWidth = width, worldHeight = height) {
+    const nativeRatio = devicePixelRatio || 1;
+    const desiredRatio = document.fullscreenElement === cabinet ? nativeRatio : Math.min(nativeRatio, 2);
+    this.renderer.setPixelRatio(Math.min(desiredRatio, this.maxRenderWidth / width, this.maxRenderHeight / height));
     this.renderer.setSize(width, height, false);
     this.worldWidth = Math.sqrt(worldWidth * worldHeight * width / height);
     this.worldHeight = worldWidth * worldHeight / this.worldWidth;
@@ -365,7 +373,7 @@ const ranked = new RankedClient({
     $('announcer').textContent = `Server verified score ${result.score}. ${result.rank ? `Your account is number ${result.rank} in the top ten.` : 'This score did not reach the top ten.'}`;
   },
 });
-new FullscreenControls({ element: cabinet, button: $('fullscreen'), notify });
+new FullscreenControls({ element: cabinet, button: $('fullscreen'), canvas, notify, onChange: () => resizeView(true) });
 
 function noteInput(event, kind) {
   telemetry.noteInput(event, kind);
@@ -1157,10 +1165,11 @@ try {
 if (view) {
   let renderedWidth = 0;
   let renderedHeight = 0;
+  let renderedRatio = 0;
   const resize = (force = false) => {
     const rect = playfield.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return;
-    if (!force && rect.width === renderedWidth && rect.height === renderedHeight) return;
+    if (!force && rect.width === renderedWidth && rect.height === renderedHeight && renderedRatio === devicePixelRatio) return;
     if (ranked.active) {
       try { ranked.setViewport(rect.width, rect.height); }
       catch (error) {
@@ -1172,11 +1181,13 @@ if (view) {
     view.resize(rect.width, rect.height, game.width, game.height);
     renderedWidth = rect.width;
     renderedHeight = rect.height;
+    renderedRatio = devicePixelRatio;
     clearInput();
     dirty = true;
   };
   resizeView = resize;
   new ResizeObserver(() => resize()).observe(playfield);
+  addEventListener('resize', () => resize());
   resize();
   updateControllerHints();
   $('launch-label').textContent = 'LAUNCH GAME';

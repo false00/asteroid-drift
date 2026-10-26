@@ -2,6 +2,7 @@ import { Game, wrappedDelta } from './engine.mjs?v=20261024.7';
 import { AccountError } from './identity.mjs?v=20261024.9';
 import { FlightRecords, isRankedResult } from './records.mjs?v=20261024.8';
 import { DEFAULT_VIEWPORT, RANKED_SCALE, arenaForViewport, isRankedArena, viewportForSize } from './arena.mjs?v=20261024.7';
+import { FlightDiagnostics, DIAGNOSTIC_INTERVAL_MS } from './diagnostics.mjs?v=20261025.1';
 
 const TAU = Math.PI * 2;
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
@@ -21,9 +22,101 @@ export class RankedClient {
     this.lastInput = -Infinity;
     this.sentViewport = null;
     this.lastViewportSent = -Infinity;
+    this.connectionId = null;
+    this.diagnosticRunId = null;
+    this.diagnostics = null;
+    this.diagnosticSequence = 0;
+    this.diagnosticQueue = [];
+    this.diagnosticSending = false;
+    this.diagnosticPending = false;
+    this.diagnosticTimer = null;
+    this.httpRtt = null;
+    this.longTasksSupported = false;
+    this.diagnosticStateAt = -Infinity;
+    this.browser = /Firefox\//.test(navigator.userAgent) ? 'firefox' : /Chrome\/|Chromium\/|Edg\//.test(navigator.userAgent) ? 'chromium' : /AppleWebKit\//.test(navigator.userAgent) ? 'webkit' : 'other';
+    const state = type => {
+      if (!this.diagnostics || !this.active || this.finished) return;
+      this.diagnostics.event(type);
+      if (type === 'pagehide' || performance.now() - this.diagnosticStateAt >= 2000) {
+        this.diagnosticStateAt = performance.now();
+        this.reportDiagnostics(type === 'pagehide' ? 'pagehide' : 'state');
+      } else void this.flushDiagnostics();
+    };
+    for (const type of ['blur', 'focus', 'offline', 'online', 'pagehide', 'pageshow']) addEventListener(type, () => state(type));
+    document.addEventListener('visibilitychange', () => state(document.hidden ? 'hidden' : 'visible'));
+    for (const type of ['freeze', 'resume']) document.addEventListener(type, () => state(type));
+    for (const type of ['error', 'unhandledrejection']) addEventListener(type, () => {
+      if (!this.diagnostics || !this.active || this.finished) return;
+      this.diagnostics.count('runtime_errors');
+    });
+    if (globalThis.PerformanceObserver?.supportedEntryTypes?.includes('longtask')) {
+      try {
+        this.longTaskObserver = new PerformanceObserver(list => {
+          if (this.active && !this.finished && this.diagnostics) for (const entry of list.getEntries()) this.diagnostics.task(entry.duration);
+        });
+        this.longTaskObserver.observe({ type: 'longtask' });
+        this.longTasksSupported = true;
+      } catch { this.longTasksSupported = false; }
+    }
   }
 
   noteControl(kind) { this.controlModes.add(kind); }
+
+  reportDiagnostics(reason, extra = {}) {
+    if (!this.connectionId || !this.diagnostics || !this.diagnosticRunId) return;
+    const canvas = document.getElementById('game');
+    const sample = this.diagnostics.sample({
+      input_sequence: this.inputSequence, buffered_bytes: this.socket?.bufferedAmount || 0,
+      http_rtt_ms: this.httpRtt, render_width: canvas?.width || 0, render_height: canvas?.height || 0,
+      pixel_ratio_x100: canvas?.clientWidth ? canvas.width / canvas.clientWidth * 100 : 0,
+      visible: !document.hidden, focused: document.hasFocus(), online: navigator.onLine,
+      fullscreen: Boolean(document.fullscreenElement), long_tasks_supported: this.longTasksSupported,
+      browser: this.browser, network: navigator.connection?.effectiveType || 'unknown',
+      game_state: this.game.state, ...extra,
+    });
+    const report = { runId: this.diagnosticRunId, connectionId: this.connectionId, sequence: ++this.diagnosticSequence, reason, sample };
+    if (this.diagnosticQueue.length >= 8) {
+      const replace = this.diagnosticQueue.findIndex(entry => entry.report.reason === 'sample');
+      this.diagnosticQueue.splice(Math.max(0, replace), 1);
+    }
+    this.diagnosticQueue.push({ report, accountId: this.accountId, until: Date.now() + 600000 });
+    void this.flushDiagnostics();
+  }
+
+  async flushDiagnostics() {
+    if (this.diagnosticSending) { this.diagnosticPending = true; return; }
+    this.diagnosticSending = true;
+    try {
+      while (this.diagnosticQueue.length) {
+        const entry = this.diagnosticQueue[0];
+        if (entry.until <= Date.now() || this.identity.session.user?.id !== entry.accountId || !this.identity.session.csrf) {
+          this.diagnosticQueue.shift();
+          continue;
+        }
+        if (!navigator.onLine) break;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        const started = performance.now();
+        try {
+          const response = await fetch('/api/ranked/diagnostics', {
+            method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', keepalive: true, signal: controller.signal,
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': this.identity.session.csrf }, body: JSON.stringify(entry.report),
+          });
+          this.httpRtt = Math.max(0, Math.round(performance.now() - started));
+          if (response.status === 429 || response.status >= 500) break;
+          const index = this.diagnosticQueue.indexOf(entry);
+          if (index >= 0) this.diagnosticQueue.splice(index, 1);
+        } catch { break; }
+        finally { clearTimeout(timeout); }
+      }
+    } finally {
+      this.diagnosticSending = false;
+      if (this.diagnosticPending) {
+        this.diagnosticPending = false;
+        void this.flushDiagnostics();
+      }
+    }
+  }
 
   setViewport(width, height) {
     try { this.viewport = viewportForSize(width, height); }
@@ -67,6 +160,12 @@ export class RankedClient {
   }
 
   async connect() {
+    if (this.diagnosticRunId === this.runId) this.reportDiagnostics('retry');
+    clearInterval(this.diagnosticTimer);
+    this.connectionId = null;
+    this.diagnosticRunId = this.runId;
+    this.diagnosticSequence = 0;
+    this.diagnostics = new FlightDiagnostics();
     const { ticket } = await this.identity.request('/api/ranked/ticket', { runId: this.runId });
     const url = new URL('/api/ranked/live', location.href);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -94,6 +193,11 @@ export class RankedClient {
           const message = JSON.parse(event.data);
           if (message.type === 'attached') {
             attached = true;
+            if (typeof message.connectionId === 'string' && /^[a-f0-9-]{36}$/.test(message.connectionId)) {
+              this.connectionId = message.connectionId;
+              this.reportDiagnostics('state');
+              this.diagnosticTimer = setInterval(() => this.reportDiagnostics('sample'), DIAGNOSTIC_INTERVAL_MS);
+            }
             clearTimeout(timeout);
             resolve();
           } else if (message.type === 'snapshot') this.receive(message);
@@ -101,6 +205,7 @@ export class RankedClient {
             if (!isRankedResult(message.result)) throw new Error('Invalid ranked result.');
             if (this.finished) return;
             this.finished = true;
+            clearInterval(this.diagnosticTimer);
             this.result = message.result;
             this.snapshots = [];
             this.game.score = message.result.score;
@@ -118,6 +223,9 @@ export class RankedClient {
           }
         } catch {
           console.error('The ranked server returned an invalid response; flight was stopped.');
+          this.diagnostics.count('response_errors');
+          this.diagnostics.event('invalid_response');
+          this.reportDiagnostics('error');
           invalidResponse = true;
           socket.close(4002, 'Invalid ranked response');
           this.game.state = 'paused';
@@ -127,6 +235,7 @@ export class RankedClient {
       });
       socket.addEventListener('close', event => {
         clearTimeout(timeout);
+        if (socket === this.socket) this.reportDiagnostics('close', { close_code: event.code, close_clean: event.wasClean });
         const failure = event.code === 4001 ? 'authentication_required' : event.code === 4010 ? 'ranked_unavailable'
           : event.code === 4000 ? 'run_not_active' : event.code === 4003 ? 'connected_elsewhere'
           : event.code === 4004 ? 'slow_connection' : 'connection_lost';
@@ -140,6 +249,11 @@ export class RankedClient {
         if (!invalidResponse) this.onFailure(new AccountError(failure));
       });
       socket.addEventListener('error', () => {
+        if (socket === this.socket) {
+          this.diagnostics.count('socket_errors');
+          this.diagnostics.event('socket_error');
+          this.reportDiagnostics('error');
+        }
         console.warn('The ranked websocket could not connect; casual flight remains available.');
       });
     });
@@ -149,6 +263,7 @@ export class RankedClient {
     const world = message.game;
     if (!world || !isRankedArena(world.width, world.height) || !Number.isFinite(world.scale) || Math.abs(world.scale - RANKED_SCALE) > 0.0000001 || !['playing', 'paused', 'gameover'].includes(world.state) || !Number.isSafeInteger(world.score) || world.score < 0 || !world.ship || !Number.isFinite(world.ship.x) || !Number.isFinite(world.ship.y) || !Array.isArray(message.events) || message.events.length > 128) throw new Error('Invalid authoritative state.');
     for (const field of ['asteroids', 'bullets', 'pickups']) if (!Array.isArray(world[field]) || world[field].length > 128) throw new Error('Invalid authoritative entities.');
+    this.diagnostics?.snapshot(this.inputSequence, message.sequence);
     const previousState = this.game.state;
     if (this.game.width !== world.width || this.game.height !== world.height) {
       this.game.resize(world.width, world.height);
@@ -168,6 +283,7 @@ export class RankedClient {
   }
 
   advance(now, dt, input) {
+    this.diagnostics?.frame(now, this.game.state === 'playing' && !document.hidden);
     this.game.updateEffects(dt);
     this.syncViewport(now);
     const newest = this.snapshots.at(-1);
@@ -197,6 +313,7 @@ export class RankedClient {
       aim: Number.isFinite(input.aim) ? Math.round(((input.aim + Math.PI) % TAU + TAU) % TAU / TAU * 65535) : null,
       controls: this.controlModes.size > 1 ? 'mixed' : [...this.controlModes][0] || 'keyboard',
     }));
+    this.diagnostics?.input(now);
   }
 
   action(type, reason = 'player') {
@@ -211,6 +328,8 @@ export class RankedClient {
   }
 
   leave() {
+    this.reportDiagnostics('state');
+    clearInterval(this.diagnosticTimer);
     this.active = false;
     this.socket?.close();
     this.socket = null;

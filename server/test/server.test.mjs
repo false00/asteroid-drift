@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { buildApp } from '../server.mjs';
 import { authenticator } from './authenticator.mjs';
+import { FlightDiagnostics } from '../../web/site/diagnostics.mjs';
 
 async function rig(t) {
   let time = 1900000000000;
@@ -101,6 +102,7 @@ test('sibling-subdomain CSRF, invalid schemas, Unicode, malformed cookies and ov
 
 test('public responses forbid caching, framing, MIME sniffing and cross-origin credentials access', async t => {
   const env = await rig(t);
+  assert.equal((await env.request('/health')).data.build, '1.3.0');
   const result = await env.request('/api/leaderboard');
   assert.equal(result.headers['cache-control'], 'no-store');
   assert.equal(result.headers['x-content-type-options'], 'nosniff');
@@ -121,6 +123,36 @@ test('ranked REST rejects browser scores and cheats rather than accepting signed
   assert.equal((await env.request('/api/ranked/start', { personalBest: 9999999 })).status, 400);
   assert.equal((await env.request('/api/ranked/start', {})).status, 200);
   assert.equal((await env.request('/api/ranked/start', {})).status, 409);
+  assert.equal(env.store.leaderboard().length, 0);
+});
+
+test('connection diagnostic HTTP reports require authentication, origin, CSRF and the owned attached connection', async t => {
+  const env = await rig(t);
+  const report = { runId: '11111111-1111-4111-8111-111111111111', connectionId: '22222222-2222-4222-8222-222222222222', sequence: 1, reason: 'close', sample: new FlightDiagnostics().sample() };
+  assert.equal((await env.request('/api/ranked/diagnostics', report)).status, 401);
+  const { result } = await env.register();
+  const pilot = env.store.account(result.data.user.id);
+  const run = env.runs.start(pilot, '198.51.100.12');
+  const value = env.cookie().split('=')[1];
+  const session = { ...env.store.session(value), value };
+  const handlers = new Map();
+  const messages = [];
+  const socket = { readyState: 1, bufferedAmount: 0, on: (name, handler) => handlers.set(name, handler), send: body => messages.push(JSON.parse(body)), ping() {}, close() {} };
+  env.runs.accept(socket, session, '198.51.100.12');
+  handlers.get('message')(Buffer.from(JSON.stringify({ type: 'attach', runId: run.id, ticket: env.runs.ticket(session, run.id, '198.51.100.12') })));
+  report.runId = run.id;
+  report.connectionId = messages[0].connectionId;
+  assert.equal((await env.request('/api/ranked/diagnostics', report, { origin: 'https://attacker.invalid' })).status, 403);
+  assert.equal((await env.request('/api/ranked/diagnostics', report, { 'x-csrf-token': 'forged' })).status, 403);
+  assert.equal((await env.request('/api/ranked/diagnostics', { ...report, connectionId: 'invalid' })).status, 404);
+  assert.equal((await env.request('/api/ranked/diagnostics', { ...report, sample: { ...report.sample, cookie: 'private' } })).status, 400);
+  assert.equal((await env.request('/api/ranked/diagnostics', { ...report, padding: 'x'.repeat(4100) })).status, 413);
+  socket.readyState = 3;
+  handlers.get('close')(1006, Buffer.alloc(0));
+  const accepted = await env.request('/api/ranked/diagnostics', report);
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.data.accepted, true);
+  assert.equal((await env.request('/api/ranked/diagnostics', report)).data.accepted, false);
   assert.equal(env.store.leaderboard().length, 0);
 });
 

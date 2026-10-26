@@ -1,9 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GameplayTelemetry, QUALIFY_MS, HEARTBEAT_MS } from '../site/telemetry.mjs';
+import { FlightDiagnostics } from '../site/diagnostics.mjs';
 
 const RUN = '11111111-1111-4111-8111-111111111111';
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('ranked diagnostic windows separate frame stalls, snapshot gaps, input gaps and bounded state transitions', () => {
+  let now = 0;
+  const diagnostics = new FlightDiagnostics({ now: () => now, wall: () => 1900000000000 });
+  diagnostics.frame(0, true);
+  diagnostics.frame(16, true);
+  diagnostics.frame(116, true);
+  diagnostics.task(88);
+  diagnostics.input(0);
+  diagnostics.input(70);
+  diagnostics.snapshot(4, 2);
+  now = 500;
+  diagnostics.snapshot(8, 3);
+  diagnostics.event('offline');
+  diagnostics.event('private-url-and-error');
+  const sample = diagnostics.sample({ game_state: 'playing', visible: true, online: false, browser: 'chromium', cookie: 'never-log' });
+  assert.equal(sample.frames, 3);
+  assert.equal(sample.frame_gap_max_ms, 100);
+  assert.equal(sample.slow_frames, 1);
+  assert.equal(sample.long_task_max_ms, 88);
+  assert.equal(sample.snapshot_gap_max_ms, 500);
+  assert.equal(sample.ack_backlog_max, 5);
+  assert.equal(sample.input_gap_max_ms, 70);
+  assert.deepEqual(sample.events, [{ type: 'offline', at_ms: 500 }]);
+  assert.doesNotMatch(JSON.stringify(sample), /never-log|private-url|cookie/);
+  assert.equal(diagnostics.sample().frames, 0);
+  for (let index = 0; index < 100; index++) diagnostics.event('focus');
+  assert.equal(diagnostics.sample().events.length, 12);
+});
 
 function setup(overrides = {}) {
   const requests = [];

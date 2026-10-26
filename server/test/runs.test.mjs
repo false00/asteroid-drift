@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { Store } from '../store.mjs';
-import { ARENA, LEASE_MS, Runs, controls, viewportArena } from '../runs.mjs';
+import { ARENA, LEASE_MS, HEARTBEAT_MS, HEARTBEAT_TIMEOUT_MS, Runs, controls, viewportArena } from '../runs.mjs';
 import { RANKED_AREA, RANKED_SCALE } from '../../web/site/arena.mjs';
+import { FlightDiagnostics } from '../../web/site/diagnostics.mjs';
 
 class Socket extends EventEmitter {
-  constructor() { super(); this.readyState = 1; this.bufferedAmount = 0; this.messages = []; }
+  constructor() { super(); this.readyState = 1; this.bufferedAmount = 0; this.messages = []; this.pings = []; }
   send(value) { this.messages.push(JSON.parse(value)); }
+  ping(value) { this.pings.push(Buffer.from(value)); }
   close(code = 1000, reason = '') {
     if (this.readyState === 3) return;
     this.code = code;
@@ -87,12 +89,92 @@ test('backpressure records the server close decision and queue size without incr
   assert.equal(run.game.state, 'paused');
 });
 
+test('heartbeat keeps paused flights connected, measures round trips and never renews the lease', t => {
+  const { store, socket, run, step } = rig(t);
+  const lease = run.leaseAt;
+  step(HEARTBEAT_MS);
+  assert.equal(socket.pings.length, 1);
+  socket.emit('pong', Buffer.from('not-the-ping'));
+  step(75);
+  socket.emit('pong', socket.pings[0]);
+  assert.equal(run.game.state, 'paused');
+  assert.equal(run.leaseAt, lease);
+  assert.equal(run.ticks, 0);
+  socket.close(1006);
+  const closed = store.export(0, 100).find(event => event.payload.event_action === 'ranked.connection_closed').payload;
+  assert.equal(closed.details.heartbeat.pings_sent, 1);
+  assert.equal(closed.details.heartbeat.pongs_received, 1);
+  assert.equal(closed.details.heartbeat.round_trip_ms, 75);
+  assert.equal(closed.details.heartbeat.max_round_trip_ms, 75);
+});
+
+test('heartbeat timeout preserves progress and is distinct from an unattributed transport loss', t => {
+  const { store, socket, run, step, pool } = rig(t);
+  run.game.score = 42000;
+  step(HEARTBEAT_MS);
+  step(HEARTBEAT_TIMEOUT_MS);
+  assert.equal(socket.code, 4005);
+  assert.equal(run.game.score, 42000);
+  assert.equal(pool.runs.get(run.id), run);
+  assert.equal(run.game.state, 'paused');
+  assert.equal(store.leaderboard().length, 0);
+  const closed = store.export(0, 100).find(event => event.payload.event_action === 'ranked.connection_closed').payload;
+  assert.equal(closed.details.reason, 'heartbeat_timeout');
+  assert.equal(closed.details.server_initiated, true);
+  assert.equal(closed.details.heartbeat.pongs_received, 0);
+});
+
 test('peer-reported invalid snapshots are classified without keeping arbitrary close reasons', t => {
   const { store, socket } = rig(t);
   socket.close(4002, 'Invalid ranked response');
   const closed = store.export(0, 100).find(event => event.payload.event_action === 'ranked.connection_closed').payload;
   assert.equal(closed.details.reason, 'peer_invalid_response');
   assert.equal(closed.details.close_code, 4002);
+});
+
+test('bounded client diagnostics correlate an owned closed connection without trusting its score', t => {
+  const { pool, run, socket, account, store, step } = rig(t);
+  step(25);
+  const sample = new FlightDiagnostics().sample({ game_state: 'paused', online: true, visible: true });
+  const report = { runId: run.id, connectionId: socket.messages.find(message => message.type === 'attached').connectionId, sequence: 1, reason: 'close', sample };
+  socket.close(1006);
+  assert.deepEqual(pool.reportDiagnostics(account, run.ip, report), { accepted: true });
+  assert.deepEqual(pool.reportDiagnostics(account, run.ip, report), { accepted: false });
+  assert.throws(() => pool.reportDiagnostics({ id: randomUUID() }, run.ip, report), /connection_not_found/);
+  const details = store.export(0, 100).find(event => event.payload.event_action === 'ranked.connection_diagnostics').payload.details;
+  assert.equal(details.connection_id, report.connectionId);
+  assert.equal(details.server.scheduler_gap_max_ms, 25);
+  assert.ok(details.server.snapshot_bytes_max > 0);
+  assert.equal(details.client.game_state, 'paused');
+  assert.equal(run.game.score, 0);
+  assert.equal(store.leaderboard().length, 0);
+  for (const extra of [{ score: 999999 }, { url: 'https://private.invalid' }, { error: 'private-error' }]) {
+    assert.throws(() => pool.reportDiagnostics(account, run.ip, { ...report, sequence: 2, sample: { ...sample, ...extra } }), /invalid_payload/);
+  }
+  assert.throws(() => pool.reportDiagnostics(account, run.ip, { ...report, sequence: 2, sample: { ...sample, frame_gap_max_ms: Infinity } }));
+  assert.throws(() => pool.reportDiagnostics(account, run.ip, { ...report, sequence: 2, sample: { ...sample, build: '20261025.1\n' } }), /invalid_diagnostics/);
+});
+
+test('server diagnostics measure simulation work separately from scheduling delay', t => {
+  const { run, socket, step, clock } = rig(t);
+  const update = run.game.update.bind(run.game);
+  run.game.update = (...args) => { clock(3); update(...args); };
+  socket.input({ type: 'resume' });
+  step(10);
+  assert.equal(run.diagnostics.scheduler_gap_max_ms, 10);
+  assert.equal(run.diagnostics.tick_work_max_us, 3000);
+  assert.equal(run.summary().diagnostics.tick_work_max_us, 3000);
+});
+
+test('diagnostic storage and delivery budgets are bounded and expired connection reports are rejected', t => {
+  const { pool, run, socket, account, advance } = rig(t);
+  const report = { runId: run.id, connectionId: socket.messages[0].connectionId, sequence: 1, reason: 'sample', sample: new FlightDiagnostics().sample() };
+  for (let sequence = 1; sequence <= 12; sequence++) pool.reportDiagnostics(account, run.ip, { ...report, sequence });
+  assert.throws(() => pool.reportDiagnostics(account, run.ip, { ...report, sequence: 13 }), /rate_limited/);
+  socket.close(1006);
+  advance(LEASE_MS);
+  assert.throws(() => pool.reportDiagnostics(account, run.ip, { ...report, sequence: 14 }), /connection_not_found/);
+  assert.equal(pool.diagnosticConnections.size, 0);
 });
 
 test('legacy manual pauses and allowlisted client pause sources remain distinct and do not advance play', t => {

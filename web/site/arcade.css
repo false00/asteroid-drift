@@ -430,7 +430,21 @@ body.touch-mode .touch-instructions { display: flex; justify-content: space-betw
   *, *::before, *::after { transition: none !important; animation: none !important; }
   .viewport::after { display: none; }
 }
-.cabinet:fullscreen { width: 100%; max-width: none; height: 100vh; height: 100svh; background: var(--bg); }
+.cabinet:fullscreen { position: relative; width: 100%; max-width: none; height: 100%; margin: 0; padding: 0; overflow: hidden; background: var(--bg); }
+.cabinet:fullscreen .arena, .cabinet:fullscreen .viewport { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.cabinet:fullscreen .arena { background: transparent; }
+.cabinet:fullscreen .instructions, .cabinet:fullscreen .footer, .cabinet:fullscreen .brand, .cabinet:fullscreen .system-status { display: none; }
+.cabinet:fullscreen .masthead { position: absolute; top: max(12px, env(safe-area-inset-top)); left: 24px; right: max(24px, env(safe-area-inset-right)); height: 36px; z-index: 9; justify-content: flex-end; }
+.cabinet:fullscreen .hud { position: absolute; top: max(50px, env(safe-area-inset-top)); left: 0; right: 0; z-index: 8; height: 70px; padding-inline: max(24px, env(safe-area-inset-left)) max(24px, env(safe-area-inset-right)); border: 0; }
+.cabinet:fullscreen .arena-bottom { position: absolute; bottom: max(10px, env(safe-area-inset-bottom)); left: 0; right: 0; z-index: 8; border: 0; }
+.cabinet:fullscreen :is(.masthead, .hud, .arena-bottom, .pilot-button, .tool-button, .console-button) { background: transparent; box-shadow: none; }
+.cabinet:fullscreen :is(.masthead, .hud, .arena-bottom, .flight-status, .field-coordinate, .reticle) { transition: opacity .2s ease; text-shadow: 0 1px 4px #000; }
+.cabinet:fullscreen .flight-status { bottom: 58px; }
+.cabinet:fullscreen .field-coordinate { top: 130px; }
+.cabinet:fullscreen .combo { top: 130px; }
+.cabinet:fullscreen .label, .cabinet:fullscreen .pilot-button, .cabinet:fullscreen .tool-button, .cabinet:fullscreen .console-button { color: var(--cream); }
+.cabinet:fullscreen.fullscreen-idle { cursor: none; }
+.cabinet:fullscreen.fullscreen-idle :is(.masthead, .hud, .arena-bottom, .flight-status, .field-coordinate, .reticle) { opacity: 0; pointer-events: none; }
 .ranked-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 7px; margin-top: 12px; }
 .secondary-button { min-height: 34px; padding: 7px 12px; background: transparent; border: 1px solid #58615f; font-size: 9px; letter-spacing: .6px; }
 .secondary-button:hover:not(:disabled) { border-color: var(--cream); background: #f1efe50c; }

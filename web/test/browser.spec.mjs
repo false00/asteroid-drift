@@ -4,6 +4,7 @@ import { RANKED_AREA, RANKED_SCALE, arenaForViewport } from '../site/arena.mjs';
 
 test('native fullscreen offers Exit/Esc on desktop without pausing and stays off iPhone', async ({ page }, testInfo) => {
   const { errors } = await openArcade(page);
+  expect(await renderedPixels(page)).toBeGreaterThan(5);
   if (testInfo.project.name !== 'desktop') {
     await expect(page.locator('#fullscreen')).toBeHidden();
     return;
@@ -17,6 +18,50 @@ test('native fullscreen offers Exit/Esc on desktop without pausing and stays off
   await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
   expect(errors).toEqual([]);
 });
+
+for (const mode of ['casual', 'ranked']) test(`fullscreen fills the device at native resolution with transparent idle-hiding chrome in ${mode}`, async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Native fullscreen requires desktop support.');
+  await page.addInitScript(() => Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 3 }));
+  const ranked = mode === 'ranked' ? await mockRanked(page) : null;
+  const { errors } = await openArcade(page, { reducedMotion: mode === 'casual' });
+  if (ranked) await page.locator('#ranked').click();
+  else await start(page);
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  await page.locator('#fullscreen').click();
+  await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
+  await expect.poll(() => page.locator('#game').evaluate(canvas => {
+    const box = canvas.getBoundingClientRect();
+    return Math.max(Math.abs(box.x), Math.abs(box.y), Math.abs(box.width - innerWidth), Math.abs(box.height - innerHeight), Math.abs(canvas.width - Math.floor(innerWidth * devicePixelRatio)), Math.abs(canvas.height - Math.floor(innerHeight * devicePixelRatio)));
+  })).toBeLessThanOrEqual(1);
+  expect(await page.locator('.hud').evaluate(element => getComputedStyle(element).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
+  expect(await page.locator('.arena-bottom').evaluate(element => getComputedStyle(element).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
+  expect(await renderedPixels(page)).toBeGreaterThan(5);
+  const draws = await page.evaluate(() => window.__arcadeDrawCalls);
+  await expect.poll(() => page.evaluate(() => window.__arcadeDrawCalls)).toBeGreaterThan(draws);
+  await expect(page.locator('.cabinet')).toHaveClass(/fullscreen-idle/, { timeout: 5000 });
+  await expect(page.locator('.hud')).toHaveCSS('opacity', '0');
+  await expect(page.locator('.arena-bottom')).toHaveCSS('opacity', '0');
+  await page.mouse.move(200, 200);
+  await expect(page.locator('.cabinet')).not.toHaveClass(/fullscreen-idle/);
+  await expect(page.locator('.hud')).toHaveCSS('opacity', '1');
+  await expect(page.locator('.cabinet')).toHaveClass(/fullscreen-idle/, { timeout: 5000 });
+  await page.keyboard.press('Tab');
+  await expect(page.locator('.hud')).toHaveCSS('opacity', '1');
+  await page.keyboard.press('p');
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'paused');
+  await expect(page.locator('.cabinet')).not.toHaveClass(/fullscreen-idle/);
+  await page.keyboard.press('Escape');
+  await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(false);
+  expect(await page.locator('#game').evaluate(canvas => canvas.width <= canvas.clientWidth * 2 + 1)).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+async function renderedPixels(page) {
+  return page.evaluate(() => new Promise(resolve => {
+    const timeout = setTimeout(() => { window.__arcadePixelProbe = null; resolve(0); }, 5000);
+    window.__arcadePixelProbe = visible => { clearTimeout(timeout); resolve(visible); };
+  }));
+}
 
 test('pilot forms allow native editing and selection without firing shortcuts or iPhone focus zoom', async ({ page }) => {
   const { errors } = await openArcade(page);
@@ -68,7 +113,19 @@ async function openArcade(page, options = {}) {
       WebGL2RenderingContext.prototype[method] = function (...args) {
         window.__arcadeDrawCalls++;
         window.__arcadeLastDrawState = document.body?.dataset.state;
-        return original.apply(this, args);
+        const result = original.apply(this, args);
+        if (window.__arcadePixelProbe) {
+          const pixels = new Uint8Array(this.drawingBufferWidth * this.drawingBufferHeight * 4);
+          this.readPixels(0, 0, this.drawingBufferWidth, this.drawingBufferHeight, this.RGBA, this.UNSIGNED_BYTE, pixels);
+          let visible = 0;
+          for (let offset = 0; offset < pixels.length && visible <= 5; offset += 4) if (pixels[offset] > 24 || pixels[offset + 1] > 24 || pixels[offset + 2] > 24) visible++;
+          if (visible > 5) {
+            const resolve = window.__arcadePixelProbe;
+            window.__arcadePixelProbe = null;
+            resolve(visible);
+          }
+        }
+        return result;
       };
     }
     const viewport = WebGL2RenderingContext.prototype.viewport;
@@ -142,6 +199,9 @@ async function mockRanked(page, { personalBest = 0, entries = [] } = {}) {
   const starts = [];
   const restarts = [];
   const pauses = [];
+  const diagnostics = [];
+  let diagnosticFailure = false;
+  let diagnosticAttempts = 0;
   let current = null;
   let ticketFailure = false;
   const viewports = [];
@@ -187,16 +247,27 @@ async function mockRanked(page, { personalBest = 0, entries = [] } = {}) {
     }
     return route.fulfill({ json: { ticket: 'test-only-portrait-ticket' } });
   });
+  await page.route('**/api/ranked/diagnostics', route => {
+    diagnosticAttempts++;
+    if (diagnosticFailure) {
+      diagnosticFailure = false;
+      return route.fulfill({ status: 503, json: { error: 'ranked_unavailable' } });
+    }
+    diagnostics.push(route.request().postDataJSON());
+    return route.fulfill({ json: { accepted: true } });
+  });
   let socket;
+  let connectionCount = 2;
   let tick = 0;
-  const snapshot = (events = []) => socket.send(JSON.stringify({ type: 'snapshot', tick: ++tick, game, events }));
+  const snapshot = (events = []) => socket.send(JSON.stringify({ type: 'snapshot', tick: ++tick, sequence: inputs.at(-1)?.seq || 0, game, events }));
   await page.routeWebSocket('**/api/ranked/live', connection => {
+    const connectionId = `00000000-0000-4000-8000-${String(++connectionCount).padStart(12, '0')}`;
     socket = connection;
     connection.onMessage(raw => {
       const message = JSON.parse(raw);
       if (message.type === 'attach') {
         resize(message.viewport);
-        connection.send(JSON.stringify({ type: 'attached' }));
+        connection.send(JSON.stringify({ type: 'attached', connectionId }));
       }
       else if (message.type === 'resume') {
         game.state = 'playing';
@@ -226,9 +297,11 @@ async function mockRanked(page, { personalBest = 0, entries = [] } = {}) {
     return result;
   };
   return {
-    game, inputs, starts, restarts, pauses, viewports, snapshot, finish,
+    game, inputs, starts, restarts, pauses, viewports, snapshot, finish, diagnostics,
+    failNextDiagnostic: () => { diagnosticFailure = true; },
+    diagnosticAttempts: () => diagnosticAttempts,
     failNextTicket: () => { ticketFailure = true; },
-    disconnect: (code = 1011) => socket.close({ code, reason: 'Local test transport interruption' }),
+    disconnect: (code = 1011, reason = 'Local test transport interruption') => socket.close({ code, reason }),
   };
 }
 
@@ -299,6 +372,39 @@ test('ranked pause diagnostics distinguish manual, focus, tab, help, account and
   await expect.poll(() => ranked.pauses.at(-1)).toBe('console');
   expect(ranked.starts).toHaveLength(1);
   expect(errors).toEqual([]);
+});
+
+test('ranked connection diagnostics survive socket loss and retry bounded HTTP delivery without raw close text', async ({ page }) => {
+  const ranked = await mockRanked(page);
+  const { errors } = await openArcade(page);
+  await page.locator('#ranked').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  await expect.poll(() => ranked.diagnostics.length).toBeGreaterThan(0);
+  await page.keyboard.down('Space');
+  await expect.poll(() => ranked.inputs.length).toBeGreaterThan(3);
+  await page.keyboard.up('Space');
+  ranked.snapshot();
+  ranked.failNextDiagnostic();
+  const attempts = ranked.diagnosticAttempts();
+  ranked.disconnect(1011, 'private-close-text-must-not-be-retained');
+  await expect(page.locator('#result-title')).toHaveText('FLIGHT INTERRUPTED');
+  await expect.poll(() => ranked.diagnosticAttempts()).toBeGreaterThan(attempts);
+  await page.evaluate(() => dispatchEvent(new Event('online')));
+  await expect.poll(() => ranked.diagnostics.filter(report => report.reason === 'close').length).toBe(1);
+  const report = ranked.diagnostics.find(entry => entry.reason === 'close');
+  expect(report.connectionId).toBe('00000000-0000-4000-8000-000000000003');
+  expect(report.sample.close_code).toBe(1011);
+  expect(report.sample.inputs).toBeGreaterThan(0);
+  expect(report.sample.snapshots).toBeGreaterThan(0);
+  expect(report.sample.render_width).toBeGreaterThan(0);
+  expect(report.sample.browser).not.toBe('other');
+  expect(JSON.stringify(ranked.diagnostics)).not.toMatch(/private-close-text|test-only-portrait-ticket|cookie|userAgent/);
+  await page.locator('#launch').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  await expect.poll(() => ranked.diagnostics.some(entry => entry.reason === 'retry' && entry.connectionId === report.connectionId)).toBe(true);
+  await expect.poll(() => ranked.diagnostics.some(entry => entry.connectionId === '00000000-0000-4000-8000-000000000004' && entry.runId === report.runId)).toBe(true);
+  expect(ranked.starts).toHaveLength(1);
+  expect(errors.filter(message => !message.includes('503'))).toEqual([]);
 });
 
 test('ranked recovery distinguishes a device handoff from a slow-receiver closure', async ({ page }) => {

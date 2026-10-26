@@ -193,7 +193,7 @@ export async function buildApp(config) {
     reply.code(status).send({ error: code });
   });
 
-  app.get('/health', async () => ({ service: 'asteroid-drift', build: '1.2.1', ranked: mutationsAvailable && runs.available, auth_enabled: Boolean(config.test || config.authEnabled) }));
+  app.get('/health', async () => ({ service: 'asteroid-drift', build: '1.3.0', ranked: mutationsAvailable && runs.available, auth_enabled: Boolean(config.test || config.authEnabled) }));
   app.get('/api/session', async request => view(session(request)));
   app.get('/api/leaderboard', async () => ({ entries: store.leaderboard(), rules: 'ranked-v1', maximum: 10 }));
 
@@ -377,6 +377,13 @@ export async function buildApp(config) {
     if (!isRunId(request.body.runId)) throw new ApiError(400, 'invalid_run');
     budget.take(`ticket:${auth.accountId}`, 12, 60000);
     return { ticket: runs.ticket(auth, request.body.runId, request.clientIP) };
+  });
+  app.post('/api/ranked/diagnostics', { bodyLimit: 4096 }, async request => {
+    const body = apiBody(request, ['runId', 'connectionId', 'sequence', 'reason', 'sample']);
+    mutable();
+    const auth = session(request, true, true);
+    budget.take(`diagnostics:${auth.accountId}`, 24, 60000);
+    return runs.reportDiagnostics(auth.account, request.clientIP, body);
   });
   app.get('/api/ranked/live', {
     websocket: true,

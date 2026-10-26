@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { buildApp } from '../server.mjs';
+import { HEARTBEAT_MS } from '../runs.mjs';
 import { RANKED_AREA, RANKED_SCALE } from '../../web/site/arena.mjs';
 
 const { chromium, devices, expect } = createRequire(new URL('../../web/package.json', import.meta.url))('@playwright/test');
@@ -25,7 +26,7 @@ try {
   assert.equal((await fetch('http://127.0.0.1:4191/health')).status, 200);
   timer = setInterval(() => service.runs.tick(), 1000 / 120);
   browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': '198.51.100.22' } });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 2, extraHTTPHeaders: { 'x-forwarded-for': '198.51.100.22' } });
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -57,6 +58,10 @@ try {
   await page.keyboard.up('Space');
   await page.locator('#fullscreen').click();
   await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
+  await expect.poll(() => page.locator('#game').evaluate(canvas => {
+    const box = canvas.getBoundingClientRect();
+    return Math.max(Math.abs(box.x), Math.abs(box.y), Math.abs(box.width - innerWidth), Math.abs(box.height - innerHeight), Math.abs(canvas.width - Math.floor(innerWidth * devicePixelRatio)), Math.abs(canvas.height - Math.floor(innerHeight * devicePixelRatio)));
+  })).toBeLessThanOrEqual(1);
   await expect.poll(async () => {
     const box = await page.locator('#playfield').boundingBox();
     return Math.abs(run.game.width / run.game.height - box.width / box.height);
@@ -67,6 +72,14 @@ try {
   await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(false);
   await page.locator('#pause').click();
   await expect.poll(() => run.game.state).toBe('paused');
+  const connection = service.runs.connections.get(run.socket);
+  const leaseAt = run.leaseAt;
+  connection.heartbeatAt -= HEARTBEAT_MS;
+  service.runs.heartbeat(run);
+  await expect.poll(() => connection.pongs).toBeGreaterThan(0);
+  assert.ok(Number.isSafeInteger(connection.rtt));
+  assert.equal(run.game.state, 'paused');
+  assert.equal(run.leaseAt, leaseAt);
   const original = { id: run.id, score: run.game.score, lives: run.game.lives, elapsed: run.game.elapsed };
   const phone = await browser.newContext({ ...devices['iPhone 13'], extraHTTPHeaders: { 'x-forwarded-for': '198.51.100.22' } });
   await phone.addCookies(await context.cookies());
@@ -132,6 +145,17 @@ try {
   const closure = service.store.export(0, 100).find(event =>
     event.payload.event_action === 'ranked.connection_closed' && event.payload.details.close_code === 1011);
   assert.equal(closure?.payload.details.reason, 'peer_closed');
+  await expect.poll(() => service.store.export(0, 100).filter(event =>
+    event.payload.event_action === 'ranked.connection_diagnostics' && event.payload.details.reason === 'close'
+    && event.payload.details.connection_id === closure.payload.details.connection_id).length).toBeGreaterThan(0);
+  const diagnostics = service.store.export(0, 100).find(event =>
+    event.payload.event_action === 'ranked.connection_diagnostics' && event.payload.details.reason === 'close'
+    && event.payload.details.connection_id === closure.payload.details.connection_id).payload.details;
+  assert.equal(diagnostics.client.close_code, 1011);
+  assert.equal(diagnostics.client.browser, 'chromium');
+  assert.ok(diagnostics.client.render_width > 0);
+  assert.ok(diagnostics.server.scheduler_gap_max_ms > 0);
+  assert.equal(JSON.stringify(diagnostics).includes('Local integration transport interruption'), false);
   await expect(page.locator('#ranked-recovery-copy')).toContainText('discards unfinished progress');
   await page.locator('#restart-ranked').click();
   await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
@@ -175,7 +199,7 @@ try {
   const bytes = await readFile(config.databasePath);
   assert.equal(bytes.includes(Buffer.from('Verified_Pilot')), false);
   assert.deepEqual(errors.filter(message => !message.includes('400 (Bad Request)')), []);
-  console.info('Verified real-browser passkeys, full-area handoff, ranked replay and recovery, account bests across restart/phone, forged-score rejection, safe records and fresh-passkey deletion.');
+  console.info('Verified real-browser passkeys, native-resolution fullscreen, paused keepalives, persisted close diagnostics, full-area handoff, ranked recovery, safe records and fresh-passkey deletion.');
 } finally {
   clearInterval(timer);
   await browser?.close();

@@ -17,7 +17,7 @@ test('the explicit static allowlist contains real browser files, not server code
 test('all browser dependencies are self-hosted and HTML has no inline executable code', async () => {
   assert.doesNotMatch(html, /<style\b|style=|on(?:click|load|error)=|https?:\/\//i);
   assert.equal([...html.matchAll(/<script\b/g)].length, 1);
-  assert.match(html, /<script type="module" src="\/arcade\.mjs\?v=20261024\.9"><\/script>/);
+  assert.match(html, /<script type="module" src="\/arcade\.mjs\?v=20261025\.1"><\/script>/);
   for (const [path, [name]] of FILES) {
     if (!name.endsWith('.mjs') || name.startsWith('vendor/')) continue;
     const source = await readFile(new URL(`../site/${name}`, import.meta.url), 'utf8');

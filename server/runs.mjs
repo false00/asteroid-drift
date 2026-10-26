@@ -2,10 +2,13 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { Game } from '../web/site/engine.mjs';
 import { DEFAULT_VIEWPORT, RANKED_SCALE, arenaForViewport, isRankedArena } from '../web/site/arena.mjs';
+import { DIAGNOSTIC_NUMBERS, DIAGNOSTIC_NULLABLE, DIAGNOSTIC_FLAGS, DIAGNOSTIC_ENUMS, DIAGNOSTIC_EVENTS, DIAGNOSTIC_REASONS } from '../web/site/diagnostics.mjs';
 import { ApiError, Budget, base64url, digest, equal, integer, object, token } from './validation.mjs';
 
 export const ARENA = Object.freeze({ width: 960, height: 640, hz: 120 });
 export const LEASE_MS = 10 * 60 * 1000;
+export const HEARTBEAT_MS = 15000;
+export const HEARTBEAT_TIMEOUT_MS = 45000;
 const EMPTY_INPUT = Object.freeze({ left: false, right: false, thrust: 0, brake: false, fire: false, shield: false, aim: null });
 const CLIENT_PAUSES = new Set(['player', 'blur', 'hidden', 'pagehide', 'console', 'manual', 'account', 'graphics', 'viewport', 'controller_lost']);
 const random = () => randomBytes(4).readUInt32BE() / 4294967296;
@@ -60,6 +63,7 @@ class Run {
     this.finished = false;
     this.events = [];
     this.viewportChanges = 0;
+    this.diagnostics = { scheduler_gap_max_ms: 0, tick_work_max_us: 0, snapshot_bytes_max: 0, queued_bytes_max: 0 };
   }
 
   checkpoint() {
@@ -72,6 +76,7 @@ class Run {
       duration_ms: Math.floor(this.game.elapsed * 1000), controlled_ms: Math.floor(this.controlledMs),
       ticks: this.ticks, input_sequence: this.sequence, controls: this.mode,
       arena_width: Math.round(this.game.width), arena_height: Math.round(this.game.height), viewport_changes: this.viewportChanges,
+      diagnostics: { ...this.diagnostics },
       ...this.game.stats, server_authoritative: true,
     };
   }
@@ -86,6 +91,7 @@ export class Runs {
     this.runs = new Map();
     this.tickets = new Map();
     this.connections = new WeakMap();
+    this.diagnosticConnections = new Map();
     this.budget = new Budget({ maximum: 256, now });
     this.previous = monotonic();
     this.accumulator = 0;
@@ -184,13 +190,29 @@ export class Runs {
     let run = null;
     let messages = 0;
     let windowAt = this.now();
-    const connection = { openedAt: this.now(), receivedAt: this.now(), received: 0, sent: 0, attached: false, closeReason: null, closeCode: null, buffered: null };
+    const connection = {
+      id: randomUUID(), accountId: session.accountId, runId: null, closedAt: null, reportSequence: 0, client: null, server: null,
+      openedAt: this.now(), receivedAt: this.now(), received: 0, sent: 0, attached: false,
+      closeReason: null, closeCode: null, buffered: null, errors: 0,
+      heartbeatAt: this.monotonic(), pingAt: null, pendingPing: null, pongAt: null,
+      pings: 0, pongs: 0, rtt: null, maxRtt: 0,
+    };
     this.connections.set(socket, connection);
     const timeout = setTimeout(() => {
       if (!run) this.close(socket, 4000, 'Attach timeout', 'attach_timeout');
     }, 3000);
     socket.on('error', () => {
+      connection.errors++;
       console.warn('A ranked websocket transport failed.');
+    });
+    socket.on('pong', data => {
+      if (!connection.pendingPing || !Buffer.isBuffer(data) || !equal(data, connection.pendingPing)) return;
+      connection.rtt = Math.max(0, Math.ceil(this.monotonic() - connection.pingAt));
+      connection.maxRtt = Math.max(connection.maxRtt, connection.rtt);
+      connection.pongAt = this.now();
+      connection.pongs++;
+      connection.pendingPing = null;
+      connection.pingAt = null;
     });
     socket.on('message', data => {
       try {
@@ -215,12 +237,15 @@ export class Runs {
           clearTimeout(timeout);
           run.socket = socket;
           connection.attached = true;
+          connection.runId = run.id;
+          this.pruneDiagnostics();
+          this.diagnosticConnections.set(connection.id, connection);
           run.session = session;
           run.sequence = 0;
           run.ip = ip;
           run.inputAt = this.now();
-          this.store.audit('ranked.connected', this.actor(run), ip, { run_id: run.id });
-          this.send(run, { type: 'attached', run: this.info(run), arena: { width: run.game.width, height: run.game.height, hz: ARENA.hz } });
+          this.store.audit('ranked.connected', this.actor(run), ip, { run_id: run.id, connection_id: connection.id });
+          this.send(run, { type: 'attached', connectionId: connection.id, run: this.info(run), arena: { width: run.game.width, height: run.game.height, hz: ARENA.hz } });
           this.snapshot(run);
           return;
         }
@@ -267,12 +292,14 @@ export class Runs {
     });
     socket.on('close', (code, reason) => {
       clearTimeout(timeout);
+      connection.closedAt = this.now();
+      connection.server = run ? { ...run.diagnostics } : null;
       if (this.shuttingDown) return;
       try {
         const reportedInvalid = code === 4002 && Buffer.isBuffer(reason) && reason.equals(Buffer.from('Invalid ranked response'));
         const closedByPeer = reportedInvalid ? 'peer_invalid_response' : code === 1006 ? 'transport_lost' : code === 1000 ? 'peer_normal' : 'peer_closed';
         this.store.audit('ranked.connection_closed', run ? this.actor(run) : session.account, ip, {
-          run_id: run?.id || null, close_code: integer(code, 1000, 4999),
+          run_id: run?.id || null, connection_id: connection.id, close_code: integer(code, 1000, 4999),
           reason: connection.closeReason || closedByPeer, attached: connection.attached,
           server_initiated: connection.closeReason !== null, requested_close_code: connection.closeCode,
           connected_ms: Math.max(0, this.now() - connection.openedAt),
@@ -280,6 +307,12 @@ export class Runs {
           last_input_age_ms: run ? Math.max(0, this.now() - run.inputAt) : null,
           buffered_bytes: connection.buffered ?? socket.bufferedAmount,
           messages_received: connection.received, messages_sent: connection.sent,
+          heartbeat: {
+            pings_sent: connection.pings, pongs_received: connection.pongs, round_trip_ms: connection.rtt,
+            max_round_trip_ms: connection.maxRtt, last_pong_age_ms: connection.pongAt === null ? null : Math.max(0, this.now() - connection.pongAt),
+            socket_errors: connection.errors,
+          },
+          server: connection.server, client: connection.client,
           score: run?.game.score ?? 0, wave: run?.game.wave ?? 0,
         });
         if (run && run.socket === socket && !run.finished) {
@@ -288,6 +321,51 @@ export class Runs {
         }
       } catch (error) { this.storageFailure(error); }
     });
+  }
+
+  pruneDiagnostics() {
+    for (const [id, connection] of this.diagnosticConnections) {
+      if (connection.closedAt !== null && (connection.closedAt + LEASE_MS <= this.now() || this.diagnosticConnections.size >= 128)) this.diagnosticConnections.delete(id);
+    }
+  }
+
+  reportDiagnostics(account, ip, value) {
+    object(value, ['runId', 'connectionId', 'sequence', 'reason', 'sample']);
+    integer(value.sequence, 1, Number.MAX_SAFE_INTEGER);
+    if (!DIAGNOSTIC_REASONS.includes(value.reason)) throw new ApiError(400, 'invalid_diagnostics');
+    this.pruneDiagnostics();
+    const connection = this.diagnosticConnections.get(value.connectionId);
+    if (!connection || connection.accountId !== account.id || connection.runId !== value.runId) throw new ApiError(404, 'connection_not_found');
+    const sample = value.sample;
+    object(sample, [...Object.keys(DIAGNOSTIC_NUMBERS), ...DIAGNOSTIC_FLAGS, ...Object.keys(DIAGNOSTIC_ENUMS), 'close_clean', 'build', 'events']);
+    for (const [name, maximum] of Object.entries(DIAGNOSTIC_NUMBERS)) {
+      if (sample[name] === null && DIAGNOSTIC_NULLABLE.includes(name)) continue;
+      integer(sample[name], name === 'close_code' ? 1000 : 0, maximum);
+    }
+    if (DIAGNOSTIC_FLAGS.some(name => typeof sample[name] !== 'boolean') || (sample.close_clean !== null && typeof sample.close_clean !== 'boolean')) throw new ApiError(400, 'invalid_diagnostics');
+    if (Object.entries(DIAGNOSTIC_ENUMS).some(([name, choices]) => !choices.includes(sample[name]))) throw new ApiError(400, 'invalid_diagnostics');
+    if (typeof sample.build !== 'string' || /[^0-9.]/.test(sample.build) || !/^\d{8}\.\d{1,3}$/.test(sample.build) || !Array.isArray(sample.events) || sample.events.length > 12) throw new ApiError(400, 'invalid_diagnostics');
+    for (const event of sample.events) {
+      object(event, ['type', 'at_ms']);
+      if (!DIAGNOSTIC_EVENTS.includes(event.type)) throw new ApiError(400, 'invalid_diagnostics');
+      integer(event.at_ms, 0, 2147483647);
+    }
+    if (value.sequence <= connection.reportSequence) return { accepted: false };
+    this.budget.take(`${account.id}:diagnostics`, 12, 60000);
+    const run = this.runs.get(connection.runId);
+    this.store.audit('ranked.connection_diagnostics', account, ip, {
+      run_id: connection.runId, connection_id: connection.id, reason: value.reason, sequence: value.sequence,
+      client: sample, server: run ? { ...run.diagnostics } : connection.server,
+      transport: {
+        round_trip_ms: connection.rtt, max_round_trip_ms: connection.maxRtt,
+        pings_sent: connection.pings, pongs_received: connection.pongs, socket_errors: connection.errors,
+        last_message_age_ms: Math.max(0, this.now() - connection.receivedAt),
+        last_pong_age_ms: connection.pongAt === null ? null : Math.max(0, this.now() - connection.pongAt),
+      },
+    });
+    connection.reportSequence = value.sequence;
+    connection.client = structuredClone(sample);
+    return { accepted: true };
   }
 
   close(socket, code, message, reason) {
@@ -301,13 +379,31 @@ export class Runs {
     socket.close(code, message);
   }
 
+  heartbeat(run) {
+    const socket = run.socket;
+    const connection = socket && this.connections.get(socket);
+    if (!connection || socket.readyState !== 1) return;
+    const clock = this.monotonic();
+    if (connection.pendingPing) {
+      if (clock - connection.pingAt >= HEARTBEAT_TIMEOUT_MS) this.close(socket, 4005, 'Connection heartbeat timed out', 'heartbeat_timeout');
+      return;
+    }
+    if (clock - connection.heartbeatAt < HEARTBEAT_MS) return;
+    connection.heartbeatAt = connection.pingAt = clock;
+    connection.pendingPing = randomBytes(8);
+    connection.pings++;
+    socket.ping(connection.pendingPing);
+  }
+
   send(run, payload) {
     if (!run.socket || run.socket.readyState !== 1) return false;
+    run.diagnostics.queued_bytes_max = Math.max(run.diagnostics.queued_bytes_max, run.socket.bufferedAmount);
     if (run.socket.bufferedAmount > 131072) {
       this.close(run.socket, 4004, 'Connection too slow', 'backpressure');
       return false;
     }
     const body = JSON.stringify(payload);
+    if (payload.type === 'snapshot') run.diagnostics.snapshot_bytes_max = Math.max(run.diagnostics.snapshot_bytes_max, Buffer.byteLength(body));
     if (Buffer.byteLength(body) > 65536) throw new Error('Ranked output exceeds its fixed budget.');
     run.socket.send(body);
     const connection = this.connections.get(run.socket);
@@ -316,7 +412,7 @@ export class Runs {
   }
 
   snapshot(run) {
-    this.send(run, { type: 'snapshot', tick: run.ticks, game: gameState(run.game), events: run.events.splice(0, 128) });
+    this.send(run, { type: 'snapshot', tick: run.ticks, sequence: run.sequence, game: gameState(run.game), events: run.events.splice(0, 128) });
     run.snapshotAt = this.now();
   }
 
@@ -395,6 +491,7 @@ export class Runs {
     const gap = clock - this.previous;
     this.previous = clock;
     if (!this.available) return;
+    for (const run of this.runs.values()) run.diagnostics.scheduler_gap_max_ms = Math.max(run.diagnostics.scheduler_gap_max_ms, Math.max(0, Math.ceil(gap)));
     try {
       if (gap > 100 || gap < 0) {
         this.accumulator = 0;
@@ -419,6 +516,7 @@ export class Runs {
         }
       }
       for (const run of this.runs.values()) {
+        this.heartbeat(run);
         if (run.game.state === 'paused' && run.leaseAt + LEASE_MS <= now) {
           this.store.atomic(() => {
             this.store.audit('ranked.expired', this.actor(run), run.ip, { ...run.summary(), reason: 'paused_or_disconnected' });
@@ -449,6 +547,10 @@ export class Runs {
         if (now - run.snapshotAt >= 50) this.snapshot(run);
       }
     } catch (error) { this.storageFailure(error); }
+    finally {
+      const elapsed = Math.max(0, Math.ceil((this.monotonic() - clock) * 1000));
+      for (const run of this.runs.values()) run.diagnostics.tick_work_max_us = Math.max(run.diagnostics.tick_work_max_us, elapsed);
+    }
   }
 
   shutdown() {

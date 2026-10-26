@@ -75,6 +75,12 @@ The backend is a single process with eight playing rooms and sixteen total rooms
 
 Encrypted connection diagnostics retain close codes, server close decisions, bounded queue/message counts, and last-message timing. Allowlisted pause reasons distinguish manual controls from focus loss, hidden tabs, and game menus. Raw socket-close text, attachment tickets, and input payloads are not recorded. A missing close frame is classified as an unattributed transport loss, not proof that the browser or network caused it.
 
+Ranked sockets send protocol-level keepalives every 15 seconds, including while paused. Missing pong responses request a diagnostic closure after 45 seconds without changing the paused flight's ten-minute recovery lease. Connection IDs correlate server ping/pong round trips, scheduling gaps, tick execution time, snapshot sizes, and output queues with browser reports.
+
+Bounded browser reports include rendered-frame gaps, long tasks where supported, snapshot and input gaps, acknowledged-input backlog, drawing-buffer dimensions, coarse browser/network categories, visibility/focus/connectivity transitions, and the browser's close code. Reports use a 4 KiB authenticated same-origin/CSRF-protected endpoint, with per-account rate limits and a memory-only queue of at most eight reports for ten minutes. They are best-effort operational hints, not score authority or proof of which network hop failed. Client clocks may differ from server time; unsupported measurements are explicitly marked. Raw errors, stacks, URLs, user-agent strings, and control payloads are excluded.
+
+Audit consumers with explicit event allowlists must accept `ranked.connection_diagnostics` before deploying this producer. Keep these reports inside the existing private encrypted audit path and exclude them from qualified-play and terminal-score totals. No new diagnostic data is exposed through the public leaderboard or health endpoint.
+
 ## Run locally
 
 Requires **Node.js 24+**, npm, and a WebGL2-capable browser. SQLite uses a native module; platforms without a matching prebuilt binary need a C++ build toolchain and Python.
@@ -101,6 +107,8 @@ npm run test:browser
 
 Tests cover simulation rules, rejected input shapes, origin and CSRF enforcement, cryptographic verification, storage failures, replay handling, and account lifecycle. Chromium and WebKit profiles exercise keyboard, multitouch, controller, fullscreen, and responsive rendering behavior.
 
+Set `PLAYWRIGHT_CAPTURE=0` to disable screenshots and traces during browser checks. Fullscreen checks verify canvas pixels, device-density drawing-buffer dimensions, and pointer/keyboard HUD behavior without image capture.
+
 The browser integration suite registers a resident passkey through a Chromium virtual authenticator, moves the same ranked flight between desktop and phone layouts, rejects a forged score, restarts against the same database and key, signs in again, and deletes the account with fresh proof. Signature verification remains part of the test.
 
 CI runs locked installs, the client bundle build, and both test suites on hosted runners with read-only repository permissions. Tests use isolated state and require no production credentials.
@@ -122,6 +130,8 @@ CI runs locked installs, the client bundle build, and both test suites on hosted
 Screenshots use local gameplay and a local demo account.
 
 Touch controls use independent pointers, safe-area layout, and screen-relative steering. Controller support includes a circular dead zone, neutral latching, and pause-on-disconnect. Fullscreen is desktop-only; rumble and haptics depend on browser and device support. iPhone Safari does not expose the required vibration/controller-actuator APIs.
+
+Native fullscreen removes page padding and borders so the game fills the complete display. Rendering uses device pixel density, bounded only by WebGL texture/renderbuffer/viewport limits; windowed rendering retains its existing 2x density cap. Score and utility controls float on transparent backgrounds and fade after two seconds of pointer inactivity during play. Pointer activity or Tab restores them, while menus and focused controls remain visible. Escape or F exits fullscreen without ending the flight.
 
 ## Operating notes
 
