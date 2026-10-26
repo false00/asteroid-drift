@@ -2,7 +2,7 @@ import { Game, wrappedDelta } from './engine.mjs?v=20261025.2';
 import { AccountError } from './identity.mjs?v=20261024.9';
 import { FlightRecords, isRankedResult } from './records.mjs?v=20261024.8';
 import { DEFAULT_VIEWPORT, RANKED_SCALE, arenaForViewport, isRankedArena, viewportForSize } from './arena.mjs?v=20261024.7';
-import { FlightDiagnostics, DIAGNOSTIC_INTERVAL_MS } from './diagnostics.mjs?v=20261025.4';
+import { FlightDiagnostics, DIAGNOSTIC_INTERVAL_MS } from './diagnostics.mjs?v=20261026.1';
 
 const TAU = Math.PI * 2;
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));

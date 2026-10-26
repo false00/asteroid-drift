@@ -4,7 +4,7 @@ import { Synth, Haptics, FrameRateMeter } from './feedback.mjs?v=20261024.8';
 import { GameplayTelemetry } from './telemetry.mjs?v=20261024.9';
 import { GamepadInput, EMPTY_GAMEPAD_INPUT } from './gamepad.mjs?v=20261024.5';
 import { Identity, AccountError } from './identity.mjs?v=20261024.9';
-import { RankedClient } from './ranked-client.mjs?v=20261025.4';
+import { RankedClient } from './ranked-client.mjs?v=20261026.1';
 import { FlightRecords } from './records.mjs?v=20261024.8';
 import { FullscreenControls, editable } from './fullscreen.mjs?v=20261025.2';
 

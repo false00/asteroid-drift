@@ -98,7 +98,7 @@ test('fullscreen touch controls and labels stay above the persistent sector foot
   expect(errors).toEqual([]);
 });
 
-test('fullscreen power-up countdown stays clear of pilot controls, shield and combo on hybrid devices', async ({ page }, testInfo) => {
+test('fullscreen flight readouts and top-right connection stay clear of every HUD neighbor', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'Native fullscreen with touch-capable desktop input.');
   await page.addInitScript(() => Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 1 }));
   const ranked = await mockRanked(page);
@@ -107,6 +107,7 @@ test('fullscreen power-up countdown stays clear of pilot controls, shield and co
   await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
   Object.assign(ranked.game, { tripleTime: 6, shieldCooldown: 3, combo: 17, comboTime: 5 });
   ranked.snapshot();
+  ranked.latency(37);
   await expect(page.locator('#weapon-label')).toHaveText('TRIPLE SHOT 6s');
   await expect(page.locator('#combo')).toBeVisible();
   for (const size of [{ width: 1440, height: 1000 }, { width: 1024, height: 768 }, { width: 844, height: 390 }, { width: 480, height: 640 }, { width: 320, height: 568 }]) {
@@ -115,12 +116,28 @@ test('fullscreen power-up countdown stays clear of pilot controls, shield and co
     await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
     await expect.poll(() => page.evaluate(() => {
       const powerup = document.getElementById('weapon-status').getBoundingClientRect();
-      const neighbors = [...document.querySelectorAll('#account, .hud, #combo, #shield-status, #shield-charge')];
-      return Math.min(...neighbors.map(element => {
+      const neighbors = [...document.querySelectorAll('#account, .hud, #combo, #shield-status, #shield-charge, .field-coordinate, #ranked-status')];
+      const gaps = neighbors.map(element => {
         const box = element.getBoundingClientRect();
         return Math.max(powerup.left - box.right, box.left - powerup.right, powerup.top - box.bottom, box.top - powerup.bottom);
-      }));
+      });
+      const coordinate = document.querySelector('.field-coordinate').getBoundingClientRect();
+      for (const element of document.querySelectorAll('#shield-status, #shield-charge')) {
+        const box = element.getBoundingClientRect();
+        gaps.push(Math.max(coordinate.left - box.right, box.left - coordinate.right, coordinate.top - box.bottom, box.top - coordinate.bottom));
+      }
+      const connection = document.getElementById('ranked-status').getBoundingClientRect();
+      for (const element of document.querySelectorAll('#account, .hud')) {
+        const box = element.getBoundingClientRect();
+        gaps.push(Math.max(connection.left - box.right, box.left - connection.right, connection.top - box.bottom, box.top - connection.bottom));
+      }
+      return Math.min(...gaps);
     })).toBeGreaterThanOrEqual(8);
+    const connection = await page.locator('#ranked-status').boundingBox();
+    const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+    expect(connection.y).toBeLessThanOrEqual(32);
+    expect(viewport.width - connection.x - connection.width).toBeLessThanOrEqual(32);
+    await expect(page.locator('#server-ping')).toHaveText('37');
     await expect(page.locator('#weapon-meter')).toBeVisible();
     await expect(page.locator('#shield-charge')).toBeVisible();
     expect(await page.locator('#flight-status').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
@@ -391,6 +408,8 @@ test('ranked connection strip shows measured ping and clears it across disconnec
   await expect(page.locator('#server-ping')).toHaveText('--');
   ranked.latency(42);
   ranked.game.tripleTime = 5;
+  ranked.game.combo = 17;
+  ranked.game.comboTime = 5;
   ranked.snapshot();
   await expect(page.locator('#server-ping')).toHaveText('42');
   await expect(page.locator('#weapon-meter')).toHaveAttribute('aria-valuenow', '50');
@@ -399,6 +418,11 @@ test('ranked connection strip shows measured ping and clears it across disconnec
   expect(status.x).toBeGreaterThanOrEqual(field.x);
   expect(status.x + status.width).toBeLessThanOrEqual(field.x + field.width);
   expect(await page.locator('#ranked-status').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await expect(page.locator('#combo')).toBeVisible();
+  const combo = await page.locator('#combo').boundingBox();
+  expect(combo.y - status.y - status.height).toBeGreaterThanOrEqual(8);
+  expect(field.x + field.width - status.x - status.width).toBeLessThanOrEqual(32);
+  expect(status.y - field.y).toBeLessThanOrEqual(80);
   ranked.disconnect();
   await expect(page.locator('#result-title')).toHaveText('FLIGHT INTERRUPTED');
   await expect(page.locator('#server-connection')).toHaveText('DISCONNECTED');
@@ -1206,10 +1230,11 @@ async function connectVirtualPad(page) {
 }
 
 async function padButton(page, index, pressed) {
-  await page.evaluate(({ index, pressed }) => {
+  const observed = await page.evaluate(({ index, pressed }) => {
     window.__virtualPad.buttons[index] = { value: Number(pressed), pressed };
+    return window.__arcadePadPolls;
   }, { index, pressed });
-  await page.waitForTimeout(50);
+  await expect.poll(() => page.evaluate(() => window.__arcadePadPolls)).toBeGreaterThan(observed);
 }
 
 test('the small FPS counter measures drawing, pauses cleanly, and fits mobile chrome', async ({ page, isMobile }) => {
