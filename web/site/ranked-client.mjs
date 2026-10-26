@@ -1,8 +1,8 @@
-import { Game, wrappedDelta } from './engine.mjs?v=20261024.7';
+import { Game, wrappedDelta } from './engine.mjs?v=20261025.2';
 import { AccountError } from './identity.mjs?v=20261024.9';
 import { FlightRecords, isRankedResult } from './records.mjs?v=20261024.8';
 import { DEFAULT_VIEWPORT, RANKED_SCALE, arenaForViewport, isRankedArena, viewportForSize } from './arena.mjs?v=20261024.7';
-import { FlightDiagnostics, DIAGNOSTIC_INTERVAL_MS } from './diagnostics.mjs?v=20261025.1';
+import { FlightDiagnostics, DIAGNOSTIC_INTERVAL_MS } from './diagnostics.mjs?v=20261025.2';
 
 const TAU = Math.PI * 2;
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
@@ -31,6 +31,8 @@ export class RankedClient {
     this.diagnosticPending = false;
     this.diagnosticTimer = null;
     this.httpRtt = null;
+    this.roundTripMs = null;
+    this.roundTripAt = null;
     this.longTasksSupported = false;
     this.diagnosticStateAt = -Infinity;
     this.browser = /Firefox\//.test(navigator.userAgent) ? 'firefox' : /Chrome\/|Chromium\/|Edg\//.test(navigator.userAgent) ? 'chromium' : /AppleWebKit\//.test(navigator.userAgent) ? 'webkit' : 'other';
@@ -164,6 +166,8 @@ export class RankedClient {
     clearInterval(this.diagnosticTimer);
     this.connectionId = null;
     this.diagnosticRunId = this.runId;
+    this.roundTripMs = null;
+    this.roundTripAt = null;
     this.diagnosticSequence = 0;
     this.diagnostics = new FlightDiagnostics();
     const { ticket } = await this.identity.request('/api/ranked/ticket', { runId: this.runId });
@@ -200,6 +204,11 @@ export class RankedClient {
             }
             clearTimeout(timeout);
             resolve();
+          } else if (message.type === 'latency') {
+            if (!Number.isSafeInteger(message.milliseconds) || message.milliseconds < 0 || message.milliseconds > 600000) throw new Error('Invalid ranked latency.');
+            this.roundTripMs = message.milliseconds;
+            this.roundTripAt = performance.now();
+            this.onFrame();
           } else if (message.type === 'snapshot') this.receive(message);
           else if (message.type === 'finished') {
             if (!isRankedResult(message.result)) throw new Error('Invalid ranked result.');

@@ -131,7 +131,11 @@ Screenshots use local gameplay and a local demo account.
 
 Touch controls use independent pointers, safe-area layout, and screen-relative steering. Controller support includes a circular dead zone, neutral latching, and pause-on-disconnect. Fullscreen is desktop-only; rumble and haptics depend on browser and device support. iPhone Safari does not expose the required vibration/controller-actuator APIs.
 
-Native fullscreen removes page padding and borders so the game fills the complete display. Rendering uses device pixel density, bounded only by WebGL texture/renderbuffer/viewport limits; windowed rendering retains its existing 2x density cap. Score and utility controls float on transparent backgrounds and fade after two seconds of pointer inactivity during play. Pointer activity or Tab restores them, while menus and focused controls remain visible. Escape or F exits fullscreen without ending the flight.
+A detected controller hides the touch controls. Touching the playfield restores them and suppresses any held controller input until the pad returns to neutral; new controller input switches back. Disconnecting a controller restores the touch interface, and an active controller flight still pauses safely on removal. Touch auto-braking does not apply while the controller interface is active.
+
+Native fullscreen removes page padding and borders so the game fills the complete display. Rendering uses device pixel density, bounded only by WebGL texture/renderbuffer/viewport limits; windowed rendering retains its existing 2x density cap. Score and utility controls float on transparent backgrounds and remain visible without an idle timeout. Shield charge, remaining power-up duration, ranked status and the server connection indicator stay on screen. Escape or F exits fullscreen without ending the flight.
+
+The ranked connection strip displays measured WebSocket round-trip latency in milliseconds, updated by heartbeat pongs even while paused. It shows `-- ms` until the first measurement and clears old measurements on disconnect, reconnect, or after 45 seconds without a fresh sample. Connection state remains visible during recovery; latency measurements never affect scoring or gameplay authority.
 
 ## Operating notes
 

@@ -102,7 +102,7 @@ test('sibling-subdomain CSRF, invalid schemas, Unicode, malformed cookies and ov
 
 test('public responses forbid caching, framing, MIME sniffing and cross-origin credentials access', async t => {
   const env = await rig(t);
-  assert.equal((await env.request('/health')).data.build, '1.3.0');
+  assert.equal((await env.request('/health')).data.build, '1.3.1');
   const result = await env.request('/api/leaderboard');
   assert.equal(result.headers['cache-control'], 'no-store');
   assert.equal(result.headers['x-content-type-options'], 'nosniff');

@@ -213,6 +213,10 @@ export class Runs {
       connection.pongs++;
       connection.pendingPing = null;
       connection.pingAt = null;
+      if (run?.socket === socket && !run.finished && this.available && !this.shuttingDown) {
+        try { this.send(run, { type: 'latency', milliseconds: connection.rtt }); }
+        catch { this.storageFailure(); }
+      }
     });
     socket.on('message', data => {
       try {

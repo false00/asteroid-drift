@@ -97,6 +97,7 @@ test('heartbeat keeps paused flights connected, measures round trips and never r
   socket.emit('pong', Buffer.from('not-the-ping'));
   step(75);
   socket.emit('pong', socket.pings[0]);
+  assert.deepEqual(socket.messages.at(-1), { type: 'latency', milliseconds: 75 });
   assert.equal(run.game.state, 'paused');
   assert.equal(run.leaseAt, lease);
   assert.equal(run.ticks, 0);

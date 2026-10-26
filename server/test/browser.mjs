@@ -78,6 +78,8 @@ try {
   service.runs.heartbeat(run);
   await expect.poll(() => connection.pongs).toBeGreaterThan(0);
   assert.ok(Number.isSafeInteger(connection.rtt));
+  await expect(page.locator('#server-connection')).toHaveText('SERVER CONNECTED');
+  await expect(page.locator('#server-ping')).toHaveText(String(connection.rtt));
   assert.equal(run.game.state, 'paused');
   assert.equal(run.leaseAt, leaseAt);
   const original = { id: run.id, score: run.game.score, lives: run.game.lives, elapsed: run.game.elapsed };

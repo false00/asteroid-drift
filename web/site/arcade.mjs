@@ -1,12 +1,12 @@
 import * as THREE from './vendor/three.module.js';
-import { Game, SHIELD_RECHARGE, CHEATS } from './engine.mjs?v=20261024.7';
+import { Game, SHIELD_RECHARGE, TRIPLE_DURATION, CHEATS } from './engine.mjs?v=20261025.2';
 import { Synth, Haptics, FrameRateMeter } from './feedback.mjs?v=20261024.8';
 import { GameplayTelemetry } from './telemetry.mjs?v=20261024.9';
 import { GamepadInput, EMPTY_GAMEPAD_INPUT } from './gamepad.mjs?v=20261024.5';
 import { Identity, AccountError } from './identity.mjs?v=20261024.9';
-import { RankedClient } from './ranked-client.mjs?v=20261025.1';
+import { RankedClient } from './ranked-client.mjs?v=20261025.2';
 import { FlightRecords } from './records.mjs?v=20261024.8';
-import { FullscreenControls, editable } from './fullscreen.mjs?v=20261025.1';
+import { FullscreenControls, editable } from './fullscreen.mjs?v=20261025.2';
 
 const $ = id => {
   const element = document.getElementById(id);
@@ -498,10 +498,17 @@ function focusMenuButton(button) {
   else if (target.bottom > bounds.bottom) scroller.scrollTop += target.bottom - bounds.bottom;
 }
 
+function setControllerMode(active) {
+  if (document.body.classList.contains('controller-mode') === active) return;
+  document.body.classList.toggle('controller-mode', active);
+  if (active) clearTouchInput();
+}
+
 function processController(now) {
   const state = controller.poll(now);
   controllerInput = state.input;
   if (state.changed) {
+    setControllerMode(state.connected);
     updateControllerHints();
     if (state.connected && !state.lost) {
       notify(state.standard ? 'Controller connected. A/RT fire, B/RB shield, Start pause.' : 'Controller detected with a custom mapping; common stick/button controls are enabled.');
@@ -519,6 +526,7 @@ function processController(now) {
   if (!state.connected || graphicsLost) return;
   if (identity.dialog.open) return;
   const actions = state.actions;
+  if (state.hasFlightInput || Object.values(actions).some(Boolean)) setControllerMode(true);
   if (actions.pause || actions.console) {
     keyboardFocus = !touchMode();
     prepareControllerAudio();
@@ -592,14 +600,18 @@ function resetStick() {
   $('stick-thumb').style.transform = 'translate(0px, 0px)';
 }
 
-function clearInput() {
-  keys.clear();
+function clearTouchInput() {
   actionPointers.clear();
   resetStick();
   tapFire = 0;
   tapShield = false;
   $('touch-fire').classList.remove('active');
   $('touch-shield').classList.remove('active');
+}
+
+function clearInput() {
+  keys.clear();
+  clearTouchInput();
   synth.setThrust(0);
   haptics.stop();
   controller.stopRumble();
@@ -973,9 +985,19 @@ function updateHud() {
   $('shield-status').textContent = game.cheats.invincible ? 'GOD MODE' : game.shieldTime > 0 ? 'SHIELD ACTIVE' : game.shieldCooldown > 0 ? 'RECHARGING' : 'SHIELD READY';
   $('shield-charge').style.transform = `scaleX(${1 - game.shieldCooldown / SHIELD_RECHARGE})`;
   $('weapon-status').hidden = game.tripleTime <= 0 && !game.cheats.tripleShot;
-  $('weapon-status').textContent = game.cheats.tripleShot ? 'TRIPLE // OVERRIDE' : `TRIPLE SHOT ${Math.ceil(game.tripleTime)}s`;
+  $('weapon-label').textContent = game.cheats.tripleShot ? 'TRIPLE // OVERRIDE' : `TRIPLE SHOT ${Math.ceil(game.tripleTime)}s`;
+  const weaponCharge = game.cheats.tripleShot ? 1 : Math.max(0, Math.min(1, game.tripleTime / TRIPLE_DURATION));
+  $('weapon-charge').style.transform = `scaleX(${weaponCharge})`;
+  $('weapon-meter').setAttribute('aria-valuenow', String(Math.round(weaponCharge * 100)));
   $('sandbox-badge').hidden = !game.cheated;
   $('ranked-badge').hidden = !ranked.active;
+  $('ranked-status').hidden = !ranked.active;
+  const connected = ranked.socket?.readyState === WebSocket.OPEN;
+  const connectionState = ranked.finished ? 'saved' : connected ? 'connected' : ranked.socket?.readyState === WebSocket.CONNECTING ? 'connecting' : 'disconnected';
+  $('server-connection').dataset.state = connectionState;
+  $('server-connection').textContent = { saved: 'RESULT SAVED', connected: 'SERVER CONNECTED', connecting: 'CONNECTING', disconnected: 'DISCONNECTED' }[connectionState];
+  const latency = connected && ranked.roundTripAt !== null && performance.now() - ranked.roundTripAt <= 45000 ? ranked.roundTripMs : null;
+  $('server-ping').textContent = latency === null ? '--' : String(latency);
   $('console').classList.toggle('sandbox', game.cheated || game.cheatMask() !== 0);
   $('touch-shield').classList.toggle('recharging', game.shieldCooldown > 0);
   $('touch-shield').setAttribute('aria-label', game.shieldCooldown > 0 ? `Shield recharging, ${Math.ceil(game.shieldCooldown)} seconds` : 'Activate shield');
@@ -1017,7 +1039,7 @@ function getInput(dt) {
     left: keys.has('KeyA') || keys.has('ArrowLeft') || controllerInput.left,
     right: keys.has('KeyD') || keys.has('ArrowRight') || controllerInput.right,
     thrust,
-    brake: keys.has('KeyS') || keys.has('ArrowDown') || controllerInput.brake || (touchMode() && stickPointer === null && thrust === 0),
+    brake: keys.has('KeyS') || keys.has('ArrowDown') || controllerInput.brake || (touchMode() && !document.body.classList.contains('controller-mode') && stickPointer === null && thrust === 0),
     manualBrake: keys.has('KeyS') || keys.has('ArrowDown') || controllerInput.brake,
     fire: keys.has('Space') || actions.includes('fire') || tapFire > 0 || controllerInput.fire,
     shield: keys.has('ShiftLeft') || keys.has('ShiftRight') || actions.includes('shield') || tapShield || controllerInput.shield,
@@ -1030,6 +1052,12 @@ function getInput(dt) {
 const flightKeys = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowLeft', 'ArrowDown', 'ArrowRight', 'Space', 'ShiftLeft', 'ShiftRight']);
 addEventListener('pointerdown', event => {
   if (event.isTrusted) keyboardFocus = event.pointerType === 'mouse';
+  if (event.isTrusted && event.pointerType === 'touch' && playfield.contains(event.target)) {
+    setControllerMode(false);
+    controllerInput = EMPTY_GAMEPAD_INPUT;
+    usingController = false;
+    controller.suppressUntilNeutral();
+  }
   unlockControllerAudio(event);
 }, { capture: true });
 addEventListener('pointerup', unlockControllerAudio, { capture: true });

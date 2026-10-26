@@ -126,6 +126,13 @@ h2 { font-family: "Arial Black", Arial, sans-serif; font-size: clamp(34px, 5.5vw
 .floater { position: absolute; top: 0; left: 0; color: var(--cream); font-size: 11px; letter-spacing: 1px; white-space: nowrap; will-change: transform, opacity; }
 .floater.red { color: var(--red); }
 .flight-status { position: absolute; left: 28px; bottom: 24px; display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 8px; letter-spacing: 1px; pointer-events: none; }
+.weapon-status { display: inline-flex; align-items: center; gap: 8px; }
+.ranked-status { position: absolute; right: 24px; bottom: 24px; z-index: 8; display: flex; flex-wrap: wrap; align-items: center; gap: 9px; min-height: 16px; max-width: calc(100% - 56px); color: #c1cbc6; font-size: 8px; letter-spacing: 0; pointer-events: none; text-shadow: 0 1px 4px #000; }
+.connection-state { display: inline-flex; align-items: center; gap: 5px; color: #ff9a8d; white-space: nowrap; }
+.connection-state::before { content: ""; width: 4px; height: 4px; flex: 0 0 4px; border-radius: 50%; background: currentColor; }
+.connection-state[data-state="connected"], .connection-state[data-state="saved"] { color: #9bd3b6; }
+.ping-meter { display: inline-flex; align-items: baseline; justify-content: flex-end; gap: 3px; min-width: 7ch; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#server-ping { min-width: 3ch; text-align: right; }
 .charge-track { width: 45px; height: 3px; background: #303237; }
 .charge-track > span { display: block; width: 100%; height: 100%; background: var(--red); transform-origin: left; }
 #weapon-status { margin-left: 15px; color: var(--red); }
@@ -152,9 +159,10 @@ h2 { font-family: "Arial Black", Arial, sans-serif; font-size: clamp(34px, 5.5vw
 .touch-copy { display: none; }
 body.touch-mode .touch-copy { display: block; }
 body.touch-mode .keyboard-copy { display: none; }
-body.touch-mode[data-state="playing"] .touch-controls { display: flex; }
+body.touch-mode:not(.controller-mode)[data-state="playing"] .touch-controls { display: flex; }
 body.touch-mode .flight-status { bottom: auto; top: 19px; left: auto; right: 26px; font-size: 7px; }
 body.touch-mode .flight-status #weapon-status { position: absolute; top: 18px; right: 0; white-space: nowrap; }
+body.touch-mode .ranked-status { top: 50px; bottom: auto; left: 16px; right: auto; max-width: calc(100% - 112px); gap: 6px; font-size: 7px; }
 body.touch-mode .combo { top: 52px; right: 26px; }
 .notice { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); z-index: 7; max-width: calc(100% - 30px); width: max-content; margin: 0; padding: 9px 12px; border: 1px solid #6b453e; background: #16110fee; color: #ffb2a7; font-size: 10px; line-height: 1.5; text-align: center; pointer-events: none; }
 .fatal-notice { position: absolute; inset: 30% 20px auto; z-index: 8; padding: 25px; background: var(--bg); color: var(--red); line-height: 1.7; text-align: center; }
@@ -438,13 +446,12 @@ body.touch-mode .touch-instructions { display: flex; justify-content: space-betw
 .cabinet:fullscreen .hud { position: absolute; top: max(50px, env(safe-area-inset-top)); left: 0; right: 0; z-index: 8; height: 70px; padding-inline: max(24px, env(safe-area-inset-left)) max(24px, env(safe-area-inset-right)); border: 0; }
 .cabinet:fullscreen .arena-bottom { position: absolute; bottom: max(10px, env(safe-area-inset-bottom)); left: 0; right: 0; z-index: 8; border: 0; }
 .cabinet:fullscreen :is(.masthead, .hud, .arena-bottom, .pilot-button, .tool-button, .console-button) { background: transparent; box-shadow: none; }
-.cabinet:fullscreen :is(.masthead, .hud, .arena-bottom, .flight-status, .field-coordinate, .reticle) { transition: opacity .2s ease; text-shadow: 0 1px 4px #000; }
+.cabinet:fullscreen :is(.masthead, .hud, .arena-bottom, .flight-status, .field-coordinate, .reticle) { text-shadow: 0 1px 4px #000; }
 .cabinet:fullscreen .flight-status { bottom: 58px; }
+.cabinet:fullscreen .ranked-status { bottom: 58px; }
 .cabinet:fullscreen .field-coordinate { top: 130px; }
 .cabinet:fullscreen .combo { top: 130px; }
 .cabinet:fullscreen .label, .cabinet:fullscreen .pilot-button, .cabinet:fullscreen .tool-button, .cabinet:fullscreen .console-button { color: var(--cream); }
-.cabinet:fullscreen.fullscreen-idle { cursor: none; }
-.cabinet:fullscreen.fullscreen-idle :is(.masthead, .hud, .arena-bottom, .flight-status, .field-coordinate, .reticle) { opacity: 0; pointer-events: none; }
 .ranked-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 7px; margin-top: 12px; }
 .secondary-button { min-height: 34px; padding: 7px 12px; background: transparent; border: 1px solid #58615f; font-size: 9px; letter-spacing: .6px; }
 .secondary-button:hover:not(:disabled) { border-color: var(--cream); background: #f1efe50c; }

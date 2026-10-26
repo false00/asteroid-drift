@@ -7,8 +7,8 @@
   <meta name="description" content="A small ship. An endless asteroid belt. Play Asteroid Drift, a free, old-school Three.js arcade game with keyboard and touch controls.">
   <title>Asteroid Drift | curl.red arcade</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/arcade.css?v=20261025.1">
-  <script type="module" src="/arcade.mjs?v=20261025.1"></script>
+  <link rel="stylesheet" href="/arcade.css?v=20261025.2">
+  <script type="module" src="/arcade.mjs?v=20261025.2"></script>
 </head>
 <body data-state="ready">
   <div class="cabinet">
@@ -117,9 +117,14 @@
         <div id="combo" class="combo" hidden><strong id="combo-multiplier">2x</strong><span>ON A ROLL</span></div>
         <div id="floaters" class="floaters" aria-hidden="true"></div>
         <div class="flight-status" id="flight-status" hidden>
-          <span id="sandbox-badge" class="sandbox-badge" hidden>SANDBOX</span><span id="ranked-badge" class="ranked-badge" hidden>SERVER VERIFIED</span>
+          <span id="sandbox-badge" class="sandbox-badge" hidden>SANDBOX</span>
           <span id="shield-status">SHIELD READY</span><span class="charge-track"><span id="shield-charge"></span></span>
-          <span id="weapon-status" hidden>TRIPLE SHOT</span>
+          <span id="weapon-status" class="weapon-status" hidden><span id="weapon-label">TRIPLE SHOT</span><span id="weapon-meter" class="charge-track" role="progressbar" aria-label="Triple-shot duration remaining" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="weapon-charge"></span></span></span>
+        </div>
+        <div class="ranked-status" id="ranked-status" aria-label="Ranked connection" hidden>
+          <span id="ranked-badge" class="ranked-badge">RANKED</span>
+          <span id="server-connection" class="connection-state" data-state="connecting">CONNECTING</span>
+          <span class="ping-meter" title="Ranked WebSocket round-trip latency; -- until a recent heartbeat is measured"><span id="server-ping">--</span><span>ms</span></span>
         </div>
 
         <div class="touch-controls" id="touch-controls" aria-label="Touch flight controls">

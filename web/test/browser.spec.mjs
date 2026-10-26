@@ -19,7 +19,7 @@ test('native fullscreen offers Exit/Esc on desktop without pausing and stays off
   expect(errors).toEqual([]);
 });
 
-for (const mode of ['casual', 'ranked']) test(`fullscreen fills the device at native resolution with transparent idle-hiding chrome in ${mode}`, async ({ page }, testInfo) => {
+for (const mode of ['casual', 'ranked']) test(`fullscreen fills the device at native resolution with transparent persistent chrome in ${mode}`, async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'Native fullscreen requires desktop support.');
   await page.addInitScript(() => Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 3 }));
   const ranked = mode === 'ranked' ? await mockRanked(page) : null;
@@ -27,6 +27,11 @@ for (const mode of ['casual', 'ranked']) test(`fullscreen fills the device at na
   if (ranked) await page.locator('#ranked').click();
   else await start(page);
   await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  if (ranked) {
+    ranked.game.tripleTime = 30;
+    ranked.snapshot();
+    ranked.latency(37);
+  }
   await page.locator('#fullscreen').click();
   await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
   await expect.poll(() => page.locator('#game').evaluate(canvas => {
@@ -38,18 +43,24 @@ for (const mode of ['casual', 'ranked']) test(`fullscreen fills the device at na
   expect(await renderedPixels(page)).toBeGreaterThan(5);
   const draws = await page.evaluate(() => window.__arcadeDrawCalls);
   await expect.poll(() => page.evaluate(() => window.__arcadeDrawCalls)).toBeGreaterThan(draws);
-  await expect(page.locator('.cabinet')).toHaveClass(/fullscreen-idle/, { timeout: 5000 });
-  await expect(page.locator('.hud')).toHaveCSS('opacity', '0');
-  await expect(page.locator('.arena-bottom')).toHaveCSS('opacity', '0');
-  await page.mouse.move(200, 200);
-  await expect(page.locator('.cabinet')).not.toHaveClass(/fullscreen-idle/);
+  await page.waitForTimeout(2400);
   await expect(page.locator('.hud')).toHaveCSS('opacity', '1');
-  await expect(page.locator('.cabinet')).toHaveClass(/fullscreen-idle/, { timeout: 5000 });
+  await expect(page.locator('.arena-bottom')).toHaveCSS('opacity', '1');
+  await expect(page.locator('#flight-status')).toHaveCSS('opacity', '1');
+  await expect(page.locator('#shield-charge')).toBeVisible();
+  if (ranked) {
+    await expect(page.locator('#weapon-status')).toBeVisible();
+    await expect(page.locator('#weapon-meter')).toBeVisible();
+    await expect(page.locator('#ranked-status')).toBeVisible();
+    await expect(page.locator('#server-connection')).toHaveText('SERVER CONNECTED');
+    await expect(page.locator('#server-ping')).toHaveText('37');
+  }
+  await page.mouse.move(200, 200);
+  await expect(page.locator('.hud')).toHaveCSS('opacity', '1');
   await page.keyboard.press('Tab');
   await expect(page.locator('.hud')).toHaveCSS('opacity', '1');
   await page.keyboard.press('p');
   await expect(page.locator('body')).toHaveAttribute('data-state', 'paused');
-  await expect(page.locator('.cabinet')).not.toHaveClass(/fullscreen-idle/);
   await page.keyboard.press('Escape');
   await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(false);
   expect(await page.locator('#game').evaluate(canvas => canvas.width <= canvas.clientWidth * 2 + 1)).toBe(true);
@@ -298,12 +309,46 @@ async function mockRanked(page, { personalBest = 0, entries = [] } = {}) {
   };
   return {
     game, inputs, starts, restarts, pauses, viewports, snapshot, finish, diagnostics,
+    latency: milliseconds => socket.send(JSON.stringify({ type: 'latency', milliseconds })),
     failNextDiagnostic: () => { diagnosticFailure = true; },
     diagnosticAttempts: () => diagnosticAttempts,
     failNextTicket: () => { ticketFailure = true; },
     disconnect: (code = 1011, reason = 'Local test transport interruption') => socket.close({ code, reason }),
   };
 }
+
+test('ranked connection strip shows measured ping and clears it across disconnect and retry', async ({ page, isMobile }) => {
+  const ranked = await mockRanked(page);
+  const { errors } = await openArcade(page);
+  if (isMobile) await page.setViewportSize({ width: 320, height: 568 });
+  await expect(page.locator('#ranked-status')).toBeHidden();
+  await page.locator('#ranked').click();
+  await expect(page.locator('#server-connection')).toHaveText('SERVER CONNECTED');
+  await expect(page.locator('#ranked-badge')).toHaveText('RANKED');
+  await expect(page.locator('#server-ping')).toHaveText('--');
+  ranked.latency(42);
+  ranked.game.tripleTime = 5;
+  ranked.snapshot();
+  await expect(page.locator('#server-ping')).toHaveText('42');
+  await expect(page.locator('#weapon-meter')).toHaveAttribute('aria-valuenow', '50');
+  const status = await page.locator('#ranked-status').boundingBox();
+  const field = await page.locator('#playfield').boundingBox();
+  expect(status.x).toBeGreaterThanOrEqual(field.x);
+  expect(status.x + status.width).toBeLessThanOrEqual(field.x + field.width);
+  expect(await page.locator('#ranked-status').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  ranked.disconnect();
+  await expect(page.locator('#result-title')).toHaveText('FLIGHT INTERRUPTED');
+  await expect(page.locator('#server-connection')).toHaveText('DISCONNECTED');
+  await expect(page.locator('#server-ping')).toHaveText('--');
+  await expect(page.locator('#ranked-status')).toBeVisible();
+  await page.locator('#launch').click();
+  await expect(page.locator('#server-connection')).toHaveText('SERVER CONNECTED');
+  await expect(page.locator('#server-ping')).toHaveText('--');
+  ranked.latency(0);
+  await expect(page.locator('#server-ping')).toHaveText('0');
+  expect(ranked.starts).toHaveLength(1);
+  expect(errors).toEqual([]);
+});
 
 test('ranked failures offer a non-destructive retry and an explicit new-flight recovery', async ({ page }) => {
   const ranked = await mockRanked(page, { personalBest: 500 });
@@ -648,6 +693,10 @@ test('ranked portrait steering follows the screen for both thumbs and controller
     const arena = await drawnArena(page);
     return Math.abs(arena.uniformScaleRatio - 1);
   }).toBeLessThan(0.001);
+  await expect(page.locator('#touch-controls')).toBeHidden();
+  const field = await page.locator('#playfield').boundingBox();
+  await page.touchscreen.tap(field.x + field.width / 2, field.y + field.height / 2);
+  await expect(page.locator('#touch-controls')).toBeVisible();
   await steer(0, -25, 16384);
   expect(ranked.starts).toHaveLength(1);
   expect(errors).toEqual([]);
@@ -1118,6 +1167,48 @@ test('the small FPS counter measures drawing, pauses cleanly, and fits mobile ch
   }
   await page.keyboard.press('p');
   await expect(page.locator('#fps')).toHaveText('--');
+  expect(errors).toEqual([]);
+});
+
+test('controller detection hides touch controls until touch takes over without held-pad takeover', async ({ page, isMobile }) => {
+  test.skip(!isMobile, 'Touch and controller handoff requires a touch-capable device.');
+  const ranked = await mockRanked(page);
+  const { errors } = await openArcade(page, { virtualGamepad: true });
+  await page.locator('#ranked').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  await expect(page.locator('#touch-controls')).toBeVisible();
+  await connectVirtualPad(page);
+  await expect(page.locator('#touch-controls')).toBeHidden();
+  await page.locator('#sound').tap();
+  await expect(page.locator('#touch-controls')).toBeHidden();
+  await page.evaluate(() => {
+    window.__virtualPad.axes = [0, -0.8];
+    window.__virtualPad.buttons[7] = { value: 1, pressed: true };
+  });
+  await expect.poll(() => ranked.inputs.some(input => input.controls === 'gamepad' && input.thrust > 0)).toBe(true);
+  const field = await page.locator('#playfield').boundingBox();
+  await page.touchscreen.tap(field.x + field.width / 2, field.y + field.height / 2);
+  await expect(page.locator('#touch-controls')).toBeVisible();
+  const polls = await page.evaluate(() => window.__arcadePadPolls);
+  await expect.poll(() => page.evaluate(() => window.__arcadePadPolls)).toBeGreaterThan(polls + 2);
+  await expect(page.locator('#touch-controls')).toBeVisible();
+  await page.locator('#touch-fire').tap();
+  await expect.poll(() => ranked.inputs.some(input => input.controls === 'mixed' && Boolean(input.keys & 4))).toBe(true);
+  await page.evaluate(() => {
+    window.__virtualPad.axes = [0, 0];
+    window.__virtualPad.buttons[7] = { value: 0, pressed: false };
+  });
+  const neutral = await page.evaluate(() => window.__arcadePadPolls);
+  await expect.poll(() => page.evaluate(() => window.__arcadePadPolls)).toBeGreaterThan(neutral + 2);
+  await padButton(page, 7, true);
+  await expect(page.locator('#touch-controls')).toBeHidden();
+  await padButton(page, 7, false);
+  await page.touchscreen.tap(field.x + field.width / 2, field.y + field.height / 2);
+  await expect(page.locator('#touch-controls')).toBeVisible();
+  await page.evaluate(() => { window.__virtualPad = null; });
+  await expect(page.locator('#system-status')).toHaveText('ALL SYSTEMS GO');
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  await expect(page.locator('#touch-controls')).toBeVisible();
   expect(errors).toEqual([]);
 });
 

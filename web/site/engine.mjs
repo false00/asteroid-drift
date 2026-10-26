@@ -1,4 +1,5 @@
 export const SHIELD_RECHARGE = 7;
+export const TRIPLE_DURATION = 10;
 export const CHEATS = [
   { key: 'infiniteLives', title: 'Infinite lives', description: 'Crash, respawn, repeat. Never run out of ships.' },
   { key: 'invincible', title: 'God mode', description: 'Let asteroids pass through your indestructible ship.' },
@@ -408,7 +409,7 @@ export class Game {
       pickup.angle += dt;
       pickup.life -= dt;
       if (this.distance(this.ship, pickup) < this.ship.radius + pickup.radius) {
-        if (pickup.kind === 'triple') this.tripleTime = 10;
+        if (pickup.kind === 'triple') this.tripleTime = TRIPLE_DURATION;
         else this.shieldCooldown = 0;
         this.stats.pickups++;
         this.addFloater(pickup.x, pickup.y, pickup.kind === 'triple' ? 'TRIPLE SHOT' : 'SHIELD READY', 'red');

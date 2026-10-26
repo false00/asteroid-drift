@@ -193,7 +193,7 @@ export async function buildApp(config) {
     reply.code(status).send({ error: code });
   });
 
-  app.get('/health', async () => ({ service: 'asteroid-drift', build: '1.3.0', ranked: mutationsAvailable && runs.available, auth_enabled: Boolean(config.test || config.authEnabled) }));
+  app.get('/health', async () => ({ service: 'asteroid-drift', build: '1.3.1', ranked: mutationsAvailable && runs.available, auth_enabled: Boolean(config.test || config.authEnabled) }));
   app.get('/api/session', async request => view(session(request)));
   app.get('/api/leaderboard', async () => ({ entries: store.leaderboard(), rules: 'ranked-v1', maximum: 10 }));
 
