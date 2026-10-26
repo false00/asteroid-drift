@@ -449,6 +449,8 @@ body.touch-mode .touch-instructions { display: flex; justify-content: space-betw
 .cabinet:fullscreen :is(.masthead, .hud, .arena-bottom, .pilot-button, .tool-button, .console-button) { background: transparent; box-shadow: none; }
 .cabinet:fullscreen :is(.masthead, .hud, .arena-bottom, .flight-status, .field-coordinate, .reticle) { text-shadow: 0 1px 4px #000; }
 .cabinet:fullscreen .flight-status { bottom: 58px; }
+body.touch-mode .cabinet:fullscreen .flight-status { top: 132px; bottom: auto; left: max(24px, env(safe-area-inset-left)); right: auto; max-width: calc(100% - 168px); flex-wrap: wrap; }
+body.touch-mode .cabinet:fullscreen .flight-status #weapon-status { position: static; margin-left: 0; }
 .cabinet:fullscreen .ranked-status { bottom: 58px; }
 .cabinet:fullscreen .field-coordinate { top: 130px; }
 .cabinet:fullscreen .combo { top: 130px; }

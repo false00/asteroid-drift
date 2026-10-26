@@ -69,7 +69,10 @@ for (const mode of ['casual', 'ranked']) test(`fullscreen fills the device at na
 
 test('fullscreen touch controls and labels stay above the persistent sector footer', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'Native fullscreen with a hybrid touch-and-mouse device.');
-  await page.addInitScript(() => Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 1 }));
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 1 });
+    Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 1.5 });
+  });
   await mockRanked(page);
   const { errors } = await openArcade(page);
   await page.locator('#ranked').click();
@@ -89,6 +92,38 @@ test('fullscreen touch controls and labels stay above the persistent sector foot
       const box = canvas.getBoundingClientRect();
       return Math.max(Math.abs(box.x), Math.abs(box.y), Math.abs(box.width - innerWidth), Math.abs(box.height - innerHeight));
     })).toBeLessThanOrEqual(1);
+    await page.keyboard.press('Escape');
+    await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(false);
+  }
+  expect(errors).toEqual([]);
+});
+
+test('fullscreen power-up countdown stays clear of pilot controls, shield and combo on hybrid devices', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Native fullscreen with touch-capable desktop input.');
+  await page.addInitScript(() => Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 1 }));
+  const ranked = await mockRanked(page);
+  const { errors } = await openArcade(page);
+  await page.locator('#ranked').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'playing');
+  Object.assign(ranked.game, { tripleTime: 6, shieldCooldown: 3, combo: 17, comboTime: 5 });
+  ranked.snapshot();
+  await expect(page.locator('#weapon-label')).toHaveText('TRIPLE SHOT 6s');
+  await expect(page.locator('#combo')).toBeVisible();
+  for (const size of [{ width: 1440, height: 1000 }, { width: 1024, height: 768 }, { width: 844, height: 390 }, { width: 480, height: 640 }, { width: 320, height: 568 }]) {
+    await page.setViewportSize(size);
+    await page.locator('#fullscreen').click();
+    await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
+    await expect.poll(() => page.evaluate(() => {
+      const powerup = document.getElementById('weapon-status').getBoundingClientRect();
+      const neighbors = [...document.querySelectorAll('#account, .hud, #combo, #shield-status, #shield-charge')];
+      return Math.min(...neighbors.map(element => {
+        const box = element.getBoundingClientRect();
+        return Math.max(powerup.left - box.right, box.left - powerup.right, powerup.top - box.bottom, box.top - powerup.bottom);
+      }));
+    })).toBeGreaterThanOrEqual(8);
+    await expect(page.locator('#weapon-meter')).toBeVisible();
+    await expect(page.locator('#shield-charge')).toBeVisible();
+    expect(await page.locator('#flight-status').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
     await page.keyboard.press('Escape');
     await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(false);
   }
