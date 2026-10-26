@@ -67,6 +67,34 @@ for (const mode of ['casual', 'ranked']) test(`fullscreen fills the device at na
   expect(errors).toEqual([]);
 });
 
+test('fullscreen touch controls and labels stay above the persistent sector footer', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Native fullscreen with a hybrid touch-and-mouse device.');
+  await page.addInitScript(() => Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 1 }));
+  await mockRanked(page);
+  const { errors } = await openArcade(page);
+  await page.locator('#ranked').click();
+  await expect(page.locator('#touch-controls')).toBeVisible();
+  for (const size of [{ width: 1440, height: 1000 }, { width: 1024, height: 768 }, { width: 844, height: 390 }, { width: 480, height: 640 }]) {
+    await page.setViewportSize(size);
+    await page.locator('#fullscreen').click();
+    await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
+    await expect.poll(() => page.evaluate(() => {
+      const footer = document.querySelector('.arena-bottom').getBoundingClientRect();
+      const controls = [...document.querySelectorAll('.touch-label, #joystick, #touch-fire, #touch-shield')];
+      return Math.min(...controls.map(element => footer.top - element.getBoundingClientRect().bottom));
+    })).toBeGreaterThanOrEqual(8);
+    await expect(page.locator('.touch-label')).toBeVisible();
+    await expect(page.locator('.arena-bottom')).toBeVisible();
+    await expect.poll(() => page.locator('#game').evaluate(canvas => {
+      const box = canvas.getBoundingClientRect();
+      return Math.max(Math.abs(box.x), Math.abs(box.y), Math.abs(box.width - innerWidth), Math.abs(box.height - innerHeight));
+    })).toBeLessThanOrEqual(1);
+    await page.keyboard.press('Escape');
+    await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(false);
+  }
+  expect(errors).toEqual([]);
+});
+
 async function renderedPixels(page) {
   return page.evaluate(() => new Promise(resolve => {
     const timeout = setTimeout(() => { window.__arcadePixelProbe = null; resolve(0); }, 5000);

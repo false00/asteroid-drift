@@ -445,6 +445,7 @@ body.touch-mode .touch-instructions { display: flex; justify-content: space-betw
 .cabinet:fullscreen .masthead { position: absolute; top: max(12px, env(safe-area-inset-top)); left: 24px; right: max(24px, env(safe-area-inset-right)); height: 36px; z-index: 9; justify-content: flex-end; }
 .cabinet:fullscreen .hud { position: absolute; top: max(50px, env(safe-area-inset-top)); left: 0; right: 0; z-index: 8; height: 70px; padding-inline: max(24px, env(safe-area-inset-left)) max(24px, env(safe-area-inset-right)); border: 0; }
 .cabinet:fullscreen .arena-bottom { position: absolute; bottom: max(10px, env(safe-area-inset-bottom)); left: 0; right: 0; z-index: 8; border: 0; }
+.cabinet:fullscreen .touch-controls { bottom: max(60px, calc(env(safe-area-inset-bottom, 0px) + 46px)); }
 .cabinet:fullscreen :is(.masthead, .hud, .arena-bottom, .pilot-button, .tool-button, .console-button) { background: transparent; box-shadow: none; }
 .cabinet:fullscreen :is(.masthead, .hud, .arena-bottom, .flight-status, .field-coordinate, .reticle) { text-shadow: 0 1px 4px #000; }
 .cabinet:fullscreen .flight-status { bottom: 58px; }

@@ -1,5 +1,5 @@
 export const DIAGNOSTIC_INTERVAL_MS = 15000;
-export const DIAGNOSTIC_BUILD = '20261025.2';
+export const DIAGNOSTIC_BUILD = '20261025.3';
 export const DIAGNOSTIC_NUMBERS = Object.freeze({
   window_ms: 600000, observed_at_ms: Number.MAX_SAFE_INTEGER,
   frames: 240000, frame_time_ms: 600000, frame_gap_max_ms: 600000, slow_frames: 240000,
